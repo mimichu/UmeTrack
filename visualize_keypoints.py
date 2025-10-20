@@ -213,6 +213,44 @@ def draw_keypoints_on_camera_view(
     return image
 
 
+def generate_default_output_path(input_video_path: str, suffix: str = "_visualized") -> str:
+    """
+    Generate default output path based on input video path.
+    
+    Args:
+        input_video_path: Path to input video file
+        suffix: Suffix to add before file extension
+        
+    Returns:
+        Generated output path
+    """
+    import os
+    
+    # Get the directory of the script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Extract the relative path from UmeTrack_data/raw_data/
+    if "UmeTrack_data/raw_data/" in input_video_path:
+        # Find the part after UmeTrack_data/raw_data/
+        parts = input_video_path.split("UmeTrack_data/raw_data/")
+        if len(parts) > 1:
+            relative_path = parts[1]
+            # Remove the .mp4 extension and add suffix
+            base_name = os.path.splitext(os.path.basename(input_video_path))[0]
+            dir_path = os.path.dirname(relative_path)
+            
+            # Create output directory structure
+            output_dir = os.path.join(script_dir, "pred", dir_path)
+            output_filename = f"{base_name}{suffix}.mp4"
+            output_path = os.path.join(output_dir, output_filename)
+            
+            return output_path
+    
+    # Fallback: create output in same directory as input
+    base_name = os.path.splitext(input_video_path)[0]
+    return f"{base_name}{suffix}.mp4"
+
+
 def visualize_video_with_keypoints(
     video_path: str,
     output_path: str,
@@ -361,7 +399,7 @@ def visualize_video_with_keypoints(
 def main():
     parser = argparse.ArgumentParser(description="Visualize hand keypoints on video")
     parser.add_argument("--input_video", required=True, help="Path to input video file")
-    parser.add_argument("--output_video", required=True, help="Path to output video file")
+    parser.add_argument("--output_video", help="Path to output video file (auto-generated if not provided)")
     parser.add_argument("--model_path", help="Path to pretrained model for predictions")
     parser.add_argument("--eval_results", help="Path to evaluation results .npy file")
     parser.add_argument("--show_gt", action="store_true", help="Show ground truth keypoints")
@@ -379,6 +417,23 @@ def main():
     if not os.path.exists(args.input_video):
         logger.error(f"Input video not found: {args.input_video}")
         return
+    
+    # Generate output path if not provided
+    if args.output_video is None:
+        # Determine suffix based on visualization type
+        suffix_parts = []
+        if args.show_gt:
+            suffix_parts.append("gt")
+        if args.show_predictions:
+            suffix_parts.append("pred")
+        if not args.single_camera:
+            suffix_parts.append("4cam")
+        else:
+            suffix_parts.append(f"cam{args.camera_idx}")
+        
+        suffix = "_" + "_".join(suffix_parts) if suffix_parts else "_visualized"
+        args.output_video = generate_default_output_path(args.input_video, suffix)
+        logger.info(f"Auto-generated output path: {args.output_video}")
     
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(args.output_video), exist_ok=True)

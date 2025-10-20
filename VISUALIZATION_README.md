@@ -33,17 +33,20 @@ This directory contains scripts for visualizing hand keypoints on video frames. 
 ### Basic Usage
 
 ```bash
-# Visualize ground truth keypoints on all 4 cameras (default)
-python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --show_gt
+# Visualize ground truth keypoints on all 4 cameras (auto-generated output path)
+python visualize_keypoints.py --input_video path/to/video.mp4 --show_gt
 
-# Visualize using pretrained model on all 4 cameras
-python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --model_path pretrained_weights.torch
+# Visualize using pretrained model on all 4 cameras (auto-generated output path)
+python visualize_keypoints.py --input_video path/to/video.mp4 --model_path pretrained_weights.torch
 
-# Visualize using evaluation results on all 4 cameras
-python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --eval_results results.npy
+# Visualize using evaluation results on all 4 cameras (auto-generated output path)
+python visualize_keypoints.py --input_video path/to/video.mp4 --eval_results results.npy
 
-# Visualize single camera only
-python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --show_gt --single_camera --camera_idx 0
+# Visualize single camera only (auto-generated output path)
+python visualize_keypoints.py --input_video path/to/video.mp4 --show_gt --single_camera --camera_idx 0
+
+# Custom output path (override auto-generation)
+python visualize_keypoints.py --input_video path/to/video.mp4 --output_video custom_output.mp4 --show_gt
 ```
 
 ### Advanced Usage
@@ -75,7 +78,7 @@ python visualize_keypoints.py \
 ### Command Line Arguments
 
 - `--input_video`: Path to input video file (required)
-- `--output_video`: Path to output video file (required)
+- `--output_video`: Path to output video file (auto-generated if not provided)
 - `--model_path`: Path to pretrained model for predictions (optional)
 - `--eval_results`: Path to evaluation results .npy file (optional)
 - `--show_gt`: Show ground truth keypoints (flag)
@@ -83,6 +86,27 @@ python visualize_keypoints.py \
 - `--camera_idx`: Camera index to visualize when using single camera mode (default: 0)
 - `--single_camera`: Show only single camera view instead of all 4 cameras
 - `--log_level`: Logging level (DEBUG, INFO, WARNING, ERROR)
+
+## Auto-Generated Output Paths
+
+When `--output_video` is not provided, the script automatically generates output paths based on the input video path:
+
+### Path Structure
+```
+Input:  UmeTrack_data/raw_data/real/separate_hand/training/user_15/recording_00.mp4
+Output: pred/real/separate_hand/training/user_15/recording_00_[suffix].mp4
+```
+
+### Naming Convention
+The suffix is automatically generated based on visualization options:
+
+| Options | Suffix | Example |
+|---------|--------|---------|
+| `--show_gt --show_predictions` (4-cam) | `_gt_pred_4cam` | `recording_00_gt_pred_4cam.mp4` |
+| `--show_gt --single_camera --camera_idx 2` | `_gt_pred_cam2` | `recording_00_gt_pred_cam2.mp4` |
+| `--show_gt` only (4-cam) | `_gt_4cam` | `recording_00_gt_4cam.mp4` |
+| `--show_predictions` only (4-cam) | `_pred_4cam` | `recording_00_pred_4cam.mp4` |
+| Default (no options) | `_visualized` | `recording_00_visualized.mp4` |
 
 ## Color Scheme
 
