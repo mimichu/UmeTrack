@@ -27,6 +27,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 from lib.tracker.video_pose_data import SyncedImagePoseStream
 from lib.tracker.perspective_crop import landmarks_from_hand_pose
 from lib.tracker.tracker import HandTracker, HandTrackerOpts
+from lib.tracker.tracking_result import SingleHandPose
 from lib.models.model_loader import load_pretrained_model
 from lib.common.hand import NUM_HANDS, NUM_LANDMARKS_PER_HAND
 
@@ -48,18 +49,21 @@ PRED_COLORS = {
     1: (255, 0, 0),    # Blue for right hand prediction
 }
 
-# Keypoint connections for hand skeleton visualization
+# Keypoint connections for hand skeleton visualization (MediaPipe-style)
+# Based on the landmark positions in the UmeTrack hand model
 HAND_CONNECTIONS = [
-    # Thumb
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    # Index finger
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    # Middle finger
-    (0, 9), (9, 10), (10, 11), (11, 12),
-    # Ring finger
-    (0, 13), (13, 14), (14, 15), (15, 16),
-    # Pinky
-    (0, 17), (17, 18), (18, 19), (19, 20),
+    # Thumb (from tip to base)
+    (1, 2), (2, 3), (3, 4), (4, 0),
+    # Index finger (from tip to base)  
+    (6, 7), (7, 8), (8, 9), (9, 0),
+    # Middle finger (from tip to base)
+    (10, 11), (11, 12), (12, 13), (13, 0),
+    # Ring finger (from tip to base)
+    (14, 15), (15, 16), (16, 17), (17, 0),
+    # Pinky (from tip to base)
+    (18, 19), (19, 20), (20, 0),
+    # Palm connections (connecting finger bases)
+    (0, 9), (9, 13), (13, 17), (17, 20), (20, 0),
 ]
 
 
@@ -171,6 +175,8 @@ def draw_keypoints_on_camera_view(
     if show_predictions and tracker and model:
         try:
             hand_model = image_pose_stream._hand_pose_labels.hand_model
+            
+            # Try to generate crop cameras from ground truth first
             crop_cameras = tracker.gen_crop_cameras(
                 [v.camera for v in input_frame.views],
                 image_pose_stream._hand_pose_labels.camera_angles,
@@ -179,8 +185,58 @@ def draw_keypoints_on_camera_view(
                 min_num_crops=1,
             )
             
+            
+            # If no crop cameras from GT, try to use previous frame's tracking result
+            if not crop_cameras and hasattr(tracker, '_last_tracking_result') and tracker._last_tracking_result:
+                # Use previous frame's hand poses to generate crop cameras
+                prev_hand_poses = tracker._last_tracking_result.hand_poses
+                if prev_hand_poses:
+                    # Create a temporary gt_tracking from previous predictions
+                    temp_gt_tracking = {}
+                    for hand_idx, prev_pose in prev_hand_poses.items():
+                        temp_gt_tracking[hand_idx] = prev_pose
+                    
+                    crop_cameras = tracker.gen_crop_cameras(
+                        [v.camera for v in input_frame.views],
+                        image_pose_stream._hand_pose_labels.camera_angles,
+                        hand_model,
+                        temp_gt_tracking,
+                        min_num_crops=1,
+                    )
+            
+            # If still no crop cameras, try to bootstrap with a default hand pose
+            if not crop_cameras and frame_idx == 0:
+                logger.info("Bootstrapping tracking with default hand pose")
+                # Create a default hand pose at a reasonable position
+                default_poses = {}
+                for hand_idx in range(2):  # Try both hands
+                    # Place hand at center of the scene, slightly forward
+                    default_wrist_xform = np.eye(4)
+                    default_wrist_xform[2, 3] = 500  # 500mm forward
+                    if hand_idx == 1:  # Right hand
+                        default_wrist_xform[0, 3] = 100  # 100mm to the right
+                    else:  # Left hand
+                        default_wrist_xform[0, 3] = -100  # 100mm to the left
+                    
+                    default_pose = SingleHandPose(
+                        joint_angles=np.zeros(21, dtype=np.float32),  # Neutral pose
+                        wrist_xform=default_wrist_xform,
+                        hand_confidence=0.8  # High confidence to pass threshold
+                    )
+                    default_poses[hand_idx] = default_pose
+                
+                crop_cameras = tracker.gen_crop_cameras(
+                    [v.camera for v in input_frame.views],
+                    image_pose_stream._hand_pose_labels.camera_angles,
+                    hand_model,
+                    default_poses,
+                    min_num_crops=1,
+                )
+            
             if crop_cameras:
                 res = tracker.track_frame(input_frame, hand_model, crop_cameras)
+                # Store the result for next frame
+                tracker._last_tracking_result = res
                 
                 for hand_idx, pred_pose in res.hand_poses.items():
                     pred_keypoints_3d = landmarks_from_hand_pose(hand_model, pred_pose, hand_idx)
@@ -189,6 +245,8 @@ def draw_keypoints_on_camera_view(
                     if len(pred_keypoints_2d) > 0:
                         color = PRED_COLORS.get(hand_idx, (0, 255, 0))
                         image = draw_hand_skeleton(image, pred_keypoints_2d, color, thickness=2, radius=3)
+            else:
+                logger.debug(f"No crop cameras generated for frame {frame_idx} - insufficient GT data or visibility")
         except Exception as e:
             logger.warning(f"Failed to process frame {frame_idx} for predictions: {e}")
     
@@ -304,6 +362,8 @@ def visualize_video_with_keypoints(
             model = load_pretrained_model(model_path)
             model.eval()
             tracker = HandTracker(model, HandTrackerOpts())
+            # Initialize tracking result storage for temporal consistency
+            tracker._last_tracking_result = None
             logger.info(f"Loaded model from: {model_path}")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
@@ -368,8 +428,7 @@ def visualize_video_with_keypoints(
             # Process single camera view
             view = input_frame.views[camera_idx]
             image = view.image.copy()
-            
-            # Convert to BGR for OpenCV
+                       # Convert to BGR for OpenCV
             if len(image.shape) == 2:
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
             else:

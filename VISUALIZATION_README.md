@@ -49,6 +49,9 @@ python visualize_keypoints.py --input_video path/to/video.mp4 --show_gt --single
 python visualize_keypoints.py --input_video path/to/video.mp4 --output_video custom_output.mp4 --show_gt
 ```
 
+# show prediction 
+
+
 ### Advanced Usage
 
 ```bash
