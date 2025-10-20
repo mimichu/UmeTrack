@@ -23,22 +23,27 @@ This directory contains scripts for visualizing hand keypoints on video frames. 
   - Different colors for GT vs predictions
 
 - **Multi-camera support**:
-  - Choose which camera view to visualize
+  - **4-panel layout**: Show all 4 camera views side by side (default)
+  - **Single camera**: Choose which camera view to visualize
   - Works with the multi-view UmeTrack data format
+  - Maintains original video dimensions
 
 ## Usage
 
 ### Basic Usage
 
 ```bash
-# Visualize ground truth keypoints
+# Visualize ground truth keypoints on all 4 cameras (default)
 python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --show_gt
 
-# Visualize using pretrained model
+# Visualize using pretrained model on all 4 cameras
 python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --model_path pretrained_weights.torch
 
-# Visualize using evaluation results
+# Visualize using evaluation results on all 4 cameras
 python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --eval_results results.npy
+
+# Visualize single camera only
+python visualize_keypoints.py --input_video path/to/video.mp4 --output_video output.mp4 --show_gt --single_camera --camera_idx 0
 ```
 
 ### Advanced Usage
@@ -75,7 +80,8 @@ python visualize_keypoints.py \
 - `--eval_results`: Path to evaluation results .npy file (optional)
 - `--show_gt`: Show ground truth keypoints (flag)
 - `--show_predictions`: Show predicted keypoints (default: True)
-- `--camera_idx`: Camera index to visualize (default: 0)
+- `--camera_idx`: Camera index to visualize when using single camera mode (default: 0)
+- `--single_camera`: Show only single camera view instead of all 4 cameras
 - `--log_level`: Logging level (DEBUG, INFO, WARNING, ERROR)
 
 ## Color Scheme

@@ -123,6 +123,96 @@ def draw_hand_skeleton(image: np.ndarray, keypoints_2d: np.ndarray, color: Tuple
     return image
 
 
+def draw_keypoints_on_camera_view(
+    image: np.ndarray, 
+    view, 
+    input_frame, 
+    gt_tracking, 
+    image_pose_stream, 
+    model, 
+    tracker, 
+    eval_data, 
+    frame_idx: int, 
+    show_gt: bool, 
+    show_predictions: bool
+) -> np.ndarray:
+    """
+    Draw keypoints on a single camera view.
+    
+    Args:
+        image: Input image for this camera view
+        view: Camera view data
+        input_frame: Full input frame data
+        gt_tracking: Ground truth tracking data
+        image_pose_stream: Image pose stream
+        model: Pretrained model
+        tracker: Hand tracker
+        eval_data: Evaluation data
+        frame_idx: Current frame index
+        show_gt: Whether to show ground truth
+        show_predictions: Whether to show predictions
+        
+    Returns:
+        Image with keypoints drawn
+    """
+    # Draw ground truth keypoints
+    if show_gt and gt_tracking:
+        hand_model = image_pose_stream._hand_pose_labels.hand_model
+        for hand_idx, gt_pose in gt_tracking.items():
+            if gt_pose.hand_confidence > 0.5:  # Only draw confident detections
+                gt_keypoints_3d = landmarks_from_hand_pose(hand_model, gt_pose, hand_idx)
+                gt_keypoints_2d = project_keypoints_to_image(gt_keypoints_3d, view.camera)
+                
+                if len(gt_keypoints_2d) > 0:
+                    color = GT_COLORS.get(hand_idx, (0, 255, 255))
+                    image = draw_hand_skeleton(image, gt_keypoints_2d, color, thickness=2, radius=3)
+    
+    # Draw predicted keypoints
+    if show_predictions and tracker and model:
+        try:
+            hand_model = image_pose_stream._hand_pose_labels.hand_model
+            crop_cameras = tracker.gen_crop_cameras(
+                [v.camera for v in input_frame.views],
+                image_pose_stream._hand_pose_labels.camera_angles,
+                hand_model,
+                gt_tracking,
+                min_num_crops=1,
+            )
+            
+            if crop_cameras:
+                res = tracker.track_frame(input_frame, hand_model, crop_cameras)
+                
+                for hand_idx, pred_pose in res.hand_poses.items():
+                    pred_keypoints_3d = landmarks_from_hand_pose(hand_model, pred_pose, hand_idx)
+                    pred_keypoints_2d = project_keypoints_to_image(pred_keypoints_3d, view.camera)
+                    
+                    if len(pred_keypoints_2d) > 0:
+                        color = PRED_COLORS.get(hand_idx, (0, 255, 0))
+                        image = draw_hand_skeleton(image, pred_keypoints_2d, color, thickness=2, radius=3)
+        except Exception as e:
+            logger.warning(f"Failed to process frame {frame_idx} for predictions: {e}")
+    
+    # Draw keypoints from evaluation results
+    if eval_data is not None:
+        if 'tracked_keypoints' in eval_data and 'valid_tracking' in eval_data:
+            tracked_keypoints = eval_data['tracked_keypoints']
+            valid_tracking = eval_data['valid_tracking']
+            
+            for hand_idx in range(NUM_HANDS):
+                if (hand_idx < tracked_keypoints.shape[0] and 
+                    frame_idx < tracked_keypoints.shape[1] and
+                    valid_tracking[hand_idx, frame_idx]):
+                    
+                    keypoints_3d = tracked_keypoints[hand_idx, frame_idx]
+                    keypoints_2d = project_keypoints_to_image(keypoints_3d, view.camera)
+                    
+                    if len(keypoints_2d) > 0:
+                        color = PRED_COLORS.get(hand_idx, (0, 255, 0))
+                        image = draw_hand_skeleton(image, keypoints_2d, color, thickness=2, radius=3)
+    
+    return image
+
+
 def visualize_video_with_keypoints(
     video_path: str,
     output_path: str,
@@ -130,7 +220,8 @@ def visualize_video_with_keypoints(
     eval_results_path: Optional[str] = None,
     show_gt: bool = False,
     show_predictions: bool = True,
-    camera_idx: int = 0
+    camera_idx: int = 0,
+    show_all_cameras: bool = True
 ):
     """
     Visualize hand keypoints on video frames.
@@ -142,7 +233,8 @@ def visualize_video_with_keypoints(
         eval_results_path: Path to evaluation results .npy file
         show_gt: Whether to show ground truth keypoints
         show_predictions: Whether to show predicted keypoints
-        camera_idx: Which camera view to visualize
+        camera_idx: Which camera view to visualize (when show_all_cameras=False)
+        show_all_cameras: Whether to show all camera views in a 4-panel layout
     """
     logger.info(f"Processing video: {video_path}")
     
@@ -183,85 +275,74 @@ def visualize_video_with_keypoints(
     # Get video properties
     first_frame = next(iter(image_pose_stream))
     input_frame, _ = first_frame
-    if camera_idx >= len(input_frame.views):
-        logger.error(f"Camera index {camera_idx} out of range. Available cameras: {len(input_frame.views)}")
-        return
     
-    sample_image = input_frame.views[camera_idx].image
-    height, width = sample_image.shape[:2]
+    if show_all_cameras:
+        # Use all 4 camera views
+        num_cameras = len(input_frame.views)
+        sample_image = input_frame.views[0].image
+        single_height, single_width = sample_image.shape[:2]
+        # Concatenate all cameras horizontally
+        total_width = single_width * num_cameras
+        total_height = single_height
+        logger.info(f"Using all {num_cameras} cameras: {single_height}x{single_width} each, total: {total_height}x{total_width}")
+    else:
+        # Use single camera view
+        if camera_idx >= len(input_frame.views):
+            logger.error(f"Camera index {camera_idx} out of range. Available cameras: {len(input_frame.views)}")
+            return
+        sample_image = input_frame.views[camera_idx].image
+        total_height, total_width = sample_image.shape[:2]
+        logger.info(f"Using camera {camera_idx}: {total_height}x{total_width}")
     
     # Setup video writer
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, 30.0, (width, height))
+    out = cv2.VideoWriter(output_path, fourcc, 30.0, (total_width, total_height))
     
     logger.info(f"Processing {len(image_pose_stream)} frames...")
     
     # Process each frame
     for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
-        # Get the camera view
-        view = input_frame.views[camera_idx]
-        image = view.image.copy()
-        
-        # Convert to BGR for OpenCV
-        if len(image.shape) == 2:
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        else:
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        
-        # Draw ground truth keypoints
-        if show_gt and gt_tracking:
-            hand_model = image_pose_stream._hand_pose_labels.hand_model
-            for hand_idx, gt_pose in gt_tracking.items():
-                if gt_pose.hand_confidence > 0.5:  # Only draw confident detections
-                    gt_keypoints_3d = landmarks_from_hand_pose(hand_model, gt_pose, hand_idx)
-                    gt_keypoints_2d = project_keypoints_to_image(gt_keypoints_3d, view.camera)
-                    
-                    if len(gt_keypoints_2d) > 0:
-                        color = GT_COLORS.get(hand_idx, (0, 255, 255))
-                        image = draw_hand_skeleton(image, gt_keypoints_2d, color, thickness=2, radius=3)
-        
-        # Draw predicted keypoints
-        if show_predictions and tracker and model:
-            try:
-                hand_model = image_pose_stream._hand_pose_labels.hand_model
-                crop_cameras = tracker.gen_crop_cameras(
-                    [v.camera for v in input_frame.views],
-                    image_pose_stream._hand_pose_labels.camera_angles,
-                    hand_model,
-                    gt_tracking,
-                    min_num_crops=1,
+        if show_all_cameras:
+            # Process all camera views
+            camera_images = []
+            for cam_idx in range(len(input_frame.views)):
+                view = input_frame.views[cam_idx]
+                image = view.image.copy()
+                
+                # Convert to BGR for OpenCV
+                if len(image.shape) == 2:
+                    image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+                else:
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                
+                # Draw keypoints on this camera view
+                image = draw_keypoints_on_camera_view(
+                    image, view, input_frame, gt_tracking, 
+                    image_pose_stream, model, tracker, eval_data, 
+                    frame_idx, show_gt, show_predictions
                 )
                 
-                if crop_cameras:
-                    res = tracker.track_frame(input_frame, hand_model, crop_cameras)
-                    
-                    for hand_idx, pred_pose in res.hand_poses.items():
-                        pred_keypoints_3d = landmarks_from_hand_pose(hand_model, pred_pose, hand_idx)
-                        pred_keypoints_2d = project_keypoints_to_image(pred_keypoints_3d, view.camera)
-                        
-                        if len(pred_keypoints_2d) > 0:
-                            color = PRED_COLORS.get(hand_idx, (0, 255, 0))
-                            image = draw_hand_skeleton(image, pred_keypoints_2d, color, thickness=2, radius=3)
-            except Exception as e:
-                logger.warning(f"Failed to process frame {frame_idx}: {e}")
-        
-        # Draw keypoints from evaluation results
-        if eval_data is not None:
-            if 'tracked_keypoints' in eval_data and 'valid_tracking' in eval_data:
-                tracked_keypoints = eval_data['tracked_keypoints']
-                valid_tracking = eval_data['valid_tracking']
-                
-                for hand_idx in range(NUM_HANDS):
-                    if (hand_idx < tracked_keypoints.shape[0] and 
-                        frame_idx < tracked_keypoints.shape[1] and
-                        valid_tracking[hand_idx, frame_idx]):
-                        
-                        keypoints_3d = tracked_keypoints[hand_idx, frame_idx]
-                        keypoints_2d = project_keypoints_to_image(keypoints_3d, view.camera)
-                        
-                        if len(keypoints_2d) > 0:
-                            color = PRED_COLORS.get(hand_idx, (0, 255, 0))
-                            image = draw_hand_skeleton(image, keypoints_2d, color, thickness=2, radius=3)
+                camera_images.append(image)
+            
+            # Concatenate all camera views horizontally
+            image = np.concatenate(camera_images, axis=1)
+        else:
+            # Process single camera view
+            view = input_frame.views[camera_idx]
+            image = view.image.copy()
+            
+            # Convert to BGR for OpenCV
+            if len(image.shape) == 2:
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            else:
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            
+            # Draw keypoints on this camera view
+            image = draw_keypoints_on_camera_view(
+                image, view, input_frame, gt_tracking, 
+                image_pose_stream, model, tracker, eval_data, 
+                frame_idx, show_gt, show_predictions
+            )
         
         # Add frame information
         cv2.putText(image, f"Frame: {frame_idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
@@ -285,7 +366,8 @@ def main():
     parser.add_argument("--eval_results", help="Path to evaluation results .npy file")
     parser.add_argument("--show_gt", action="store_true", help="Show ground truth keypoints")
     parser.add_argument("--show_predictions", action="store_true", default=True, help="Show predicted keypoints")
-    parser.add_argument("--camera_idx", type=int, default=0, help="Camera index to visualize")
+    parser.add_argument("--camera_idx", type=int, default=0, help="Camera index to visualize (when --single_camera is used)")
+    parser.add_argument("--single_camera", action="store_true", help="Show only single camera view instead of all 4 cameras")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     
     args = parser.parse_args()
@@ -309,7 +391,8 @@ def main():
         eval_results_path=args.eval_results,
         show_gt=args.show_gt,
         show_predictions=args.show_predictions,
-        camera_idx=args.camera_idx
+        camera_idx=args.camera_idx,
+        show_all_cameras=not args.single_camera
     )
 
 
