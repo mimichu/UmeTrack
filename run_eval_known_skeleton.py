@@ -60,6 +60,11 @@ def _track_sequence(
     model.eval()
 
     image_pose_stream = SyncedImagePoseStream(data_path)
+    
+    # Skip processing if the video stream is invalid
+    if len(image_pose_stream) == 0:
+        logger.info(f"Skipping {data_path} due to invalid video file")
+        return None
 
     gt_keypoints = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
     tracked_keypoints = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
@@ -112,8 +117,10 @@ if __name__ == '__main__':
     input_paths, output_paths = _find_input_output_files(input_dir, output_dir, test_only=True)
     pool_size = 8
     with Pool(pool_size) as p:
-        error_tensors = p.map_async(partial(_track_sequence, model_path=model_path), zip(input_paths, output_paths)).get()
+        error_tensors = p.map_async(partial(_track_sequence, model_path=model_path, override=True), zip(input_paths, output_paths)).get()
 
     error_tensors = [t for t in error_tensors if t is not None]
     if len(error_tensors) != 0:
         logger.info(f"Final mean error: {np.concatenate(error_tensors).mean()}")
+    else:
+        logger.warning("No valid video files were processed - all files may be corrupted or invalid")

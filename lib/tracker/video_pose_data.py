@@ -39,20 +39,36 @@ class VideoStream:
         self._data_path = data_path
 
     def __len__(self) -> int:
-        container = av.open(self._data_path)
-        # take first video stream
-        stream = container.streams.video[0]
-        return stream.frames
+        try:
+            container = av.open(self._data_path)
+            # take first video stream
+            stream = container.streams.video[0]
+            return stream.frames
+        except (av.error.InvalidDataError, av.error.OSError, FileNotFoundError, IndexError) as e:
+            print(f"Warning: Could not open video file {self._data_path}: {e}")
+            # Return 0 as a fallback for invalid/corrupted files
+            return 0
+        except Exception as e:
+            print(f"Warning: Unexpected error opening video file {self._data_path}: {e}")
+            return 0
 
     def __iter__(self) -> Iterator[np.ndarray]:
-        container = av.open(self._data_path)
-        # take first video stream
-        stream = container.streams.video[0]
-        print(f"Opened ({int(stream.average_rate)} fps) video from {self._data_path}")
+        try:
+            container = av.open(self._data_path)
+            # take first video stream
+            stream = container.streams.video[0]
+            print(f"Opened ({int(stream.average_rate)} fps) video from {self._data_path}")
 
-        for idx, frame in enumerate(container.decode(stream)):
-            raw_mono_image_np = np.array(frame.to_image())[..., 0]
-            yield raw_mono_image_np
+            for idx, frame in enumerate(container.decode(stream)):
+                raw_mono_image_np = np.array(frame.to_image())[..., 0]
+                yield raw_mono_image_np
+        except (av.error.InvalidDataError, av.error.OSError, FileNotFoundError, IndexError) as e:
+            print(f"Warning: Could not open video file {self._data_path}: {e}")
+            # Return empty iterator for invalid/corrupted files
+            return
+        except Exception as e:
+            print(f"Warning: Unexpected error opening video file {self._data_path}: {e}")
+            return
 
 
 def _load_json(p: str):
@@ -95,15 +111,30 @@ def _load_hand_pose_labels(p: str) -> HandPoseLabels:
 
 class SyncedImagePoseStream:
     def __init__(self, data_path: str):
-        label_path = data_path[:-4] + ".json"
-        self._hand_pose_labels = _load_hand_pose_labels(label_path)
+        self._data_path = data_path
         self._image_stream = VideoStream(data_path)
-        assert len(self._hand_pose_labels) == len(self._image_stream)
+        video_length = len(self._image_stream)
+        
+        if video_length == 0:
+            print(f"Warning: Video file {data_path} appears to be invalid or corrupted, skipping...")
+            # Set a flag to indicate this stream is invalid
+            self._is_valid = False
+            self._hand_pose_labels = None
+        else:
+            # Only load pose labels if video is valid
+            label_path = data_path[:-4] + ".json"
+            self._hand_pose_labels = _load_hand_pose_labels(label_path)
+            self._is_valid = True
+            assert len(self._hand_pose_labels) == video_length, f"Mismatch between pose labels ({len(self._hand_pose_labels)}) and video frames ({video_length})"
 
     def __len__(self) -> int:
+        if not self._is_valid:
+            return 0
         return len(self._image_stream)
 
     def __iter__(self):
+        if not self._is_valid or self._hand_pose_labels is None:
+            return
         for frame_idx, raw_mono in enumerate(self._image_stream):
             gt_tracking = {}
             for hand_idx in range(0, 2):
