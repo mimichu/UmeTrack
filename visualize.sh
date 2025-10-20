@@ -1,1 +1,1 @@
-python visualize_keypoints.py --input_video /home/chuerpan/repo/InteractionRetarget/submodules/UmeTrack/UmeTrack_data/raw_data/real/separate_hand/training/user_15/recording_01.mp4 --model_path pretrained_models/pretrained_weights.torch --show_predictions 
+python visualize_keypoints.py --input_video /home/chuerpan/repo/InteractionRetarget/submodules/UmeTrack/UmeTrack_data/raw_data/real/hand_hand/training/user_01/recording_01.mp4 --model_path pretrained_models/pretrained_weights.torch --show_gt --show_predictions --show_indices

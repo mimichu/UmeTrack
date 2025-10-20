@@ -50,20 +50,20 @@ PRED_COLORS = {
 }
 
 # Keypoint connections for hand skeleton visualization (MediaPipe-style)
-# Based on the landmark positions in the UmeTrack hand model
+# Based on MediaPipe hand landmark model structure
 HAND_CONNECTIONS = [
-    # Thumb (from tip to base)
-    (1, 2), (2, 3), (3, 4), (4, 0),
-    # Index finger (from tip to base)  
-    (6, 7), (7, 8), (8, 9), (9, 0),
-    # Middle finger (from tip to base)
-    (10, 11), (11, 12), (12, 13), (13, 0),
-    # Ring finger (from tip to base)
-    (14, 15), (15, 16), (16, 17), (17, 0),
-    # Pinky (from tip to base)
-    (18, 19), (19, 20), (20, 0),
-    # Palm connections (connecting finger bases)
-    (0, 9), (9, 13), (13, 17), (17, 20), (20, 0),
+    # Thumb (4 landmarks: tip to base)
+    (4, 3), (3, 2), (2, 1), (1, 0),
+    # Index finger (4 landmarks: tip to base)
+    (8, 7), (7, 6), (6, 5), (5, 0),
+    # Middle finger (4 landmarks: tip to base)
+    (12, 11), (11, 10), (10, 9), (9, 0),
+    # Ring finger (4 landmarks: tip to base)
+    (16, 15), (15, 14), (14, 13), (13, 0),
+    # Pinky (3 landmarks: tip to base)
+    (20, 19), (19, 18), (18, 0),
+    # Palm connections (connecting finger bases in order)
+    (0, 5), (5, 9), (9, 13), (13, 18), (18, 0),
 ]
 
 
@@ -88,7 +88,7 @@ def project_keypoints_to_image(keypoints_3d: np.ndarray, camera) -> np.ndarray:
 
 
 def draw_hand_skeleton(image: np.ndarray, keypoints_2d: np.ndarray, color: Tuple[int, int, int], 
-                      thickness: int = 2, radius: int = 3) -> np.ndarray:
+                      thickness: int = 2, radius: int = 3, show_indices: bool = False) -> np.ndarray:
     """
     Draw hand skeleton on the image.
     
@@ -98,6 +98,7 @@ def draw_hand_skeleton(image: np.ndarray, keypoints_2d: np.ndarray, color: Tuple
         color: Color for drawing (B, G, R)
         thickness: Line thickness
         radius: Keypoint radius
+        show_indices: Whether to show keypoint indices as text labels
         
     Returns:
         Image with drawn skeleton
@@ -108,9 +109,16 @@ def draw_hand_skeleton(image: np.ndarray, keypoints_2d: np.ndarray, color: Tuple
     image = image.copy()
     
     # Draw keypoints
-    for point in keypoints_2d:
+    for idx, point in enumerate(keypoints_2d):
         if not np.isnan(point).any() and point[0] >= 0 and point[1] >= 0:
             cv2.circle(image, (int(point[0]), int(point[1])), radius, color, -1)
+            
+            # Add index label if requested
+            if show_indices:
+                # Position text slightly offset from the keypoint
+                text_pos = (int(point[0]) + radius + 2, int(point[1]) - radius - 2)
+                cv2.putText(image, str(idx), text_pos, cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.4, color, 1)
     
     # Draw connections
     for start_idx, end_idx in HAND_CONNECTIONS:
@@ -138,7 +146,8 @@ def draw_keypoints_on_camera_view(
     eval_data, 
     frame_idx: int, 
     show_gt: bool, 
-    show_predictions: bool
+    show_predictions: bool,
+    show_indices: bool = False
 ) -> np.ndarray:
     """
     Draw keypoints on a single camera view.
@@ -155,6 +164,7 @@ def draw_keypoints_on_camera_view(
         frame_idx: Current frame index
         show_gt: Whether to show ground truth
         show_predictions: Whether to show predictions
+        show_indices: Whether to show keypoint indices as labels
         
     Returns:
         Image with keypoints drawn
@@ -169,7 +179,7 @@ def draw_keypoints_on_camera_view(
                 
                 if len(gt_keypoints_2d) > 0:
                     color = GT_COLORS.get(hand_idx, (0, 255, 255))
-                    image = draw_hand_skeleton(image, gt_keypoints_2d, color, thickness=2, radius=3)
+                    image = draw_hand_skeleton(image, gt_keypoints_2d, color, thickness=2, radius=3, show_indices=show_indices)
     
     # Draw predicted keypoints
     if show_predictions and tracker and model:
@@ -244,7 +254,7 @@ def draw_keypoints_on_camera_view(
                     
                     if len(pred_keypoints_2d) > 0:
                         color = PRED_COLORS.get(hand_idx, (0, 255, 0))
-                        image = draw_hand_skeleton(image, pred_keypoints_2d, color, thickness=2, radius=3)
+                        image = draw_hand_skeleton(image, pred_keypoints_2d, color, thickness=2, radius=3, show_indices=show_indices)
             else:
                 logger.debug(f"No crop cameras generated for frame {frame_idx} - insufficient GT data or visibility")
         except Exception as e:
@@ -266,7 +276,7 @@ def draw_keypoints_on_camera_view(
                     
                     if len(keypoints_2d) > 0:
                         color = PRED_COLORS.get(hand_idx, (0, 255, 0))
-                        image = draw_hand_skeleton(image, keypoints_2d, color, thickness=2, radius=3)
+                        image = draw_hand_skeleton(image, keypoints_2d, color, thickness=2, radius=3, show_indices=show_indices)
     
     return image
 
@@ -317,7 +327,8 @@ def visualize_video_with_keypoints(
     show_gt: bool = False,
     show_predictions: bool = True,
     camera_idx: int = 0,
-    show_all_cameras: bool = True
+    show_all_cameras: bool = True,
+    show_indices: bool = False
 ):
     """
     Visualize hand keypoints on video frames.
@@ -331,6 +342,7 @@ def visualize_video_with_keypoints(
         show_predictions: Whether to show predicted keypoints
         camera_idx: Which camera view to visualize (when show_all_cameras=False)
         show_all_cameras: Whether to show all camera views in a 4-panel layout
+        show_indices: Whether to show keypoint indices as labels
     """
     logger.info(f"Processing video: {video_path}")
     
@@ -417,7 +429,7 @@ def visualize_video_with_keypoints(
                 image = draw_keypoints_on_camera_view(
                     image, view, input_frame, gt_tracking, 
                     image_pose_stream, model, tracker, eval_data, 
-                    frame_idx, show_gt, show_predictions
+                    frame_idx, show_gt, show_predictions, show_indices
                 )
                 
                 camera_images.append(image)
@@ -438,7 +450,7 @@ def visualize_video_with_keypoints(
             image = draw_keypoints_on_camera_view(
                 image, view, input_frame, gt_tracking, 
                 image_pose_stream, model, tracker, eval_data, 
-                frame_idx, show_gt, show_predictions
+                frame_idx, show_gt, show_predictions, show_indices
             )
         
         # Add frame information
@@ -463,6 +475,7 @@ def main():
     parser.add_argument("--eval_results", help="Path to evaluation results .npy file")
     parser.add_argument("--show_gt", action="store_true", help="Show ground truth keypoints")
     parser.add_argument("--show_predictions", action="store_true", default=True, help="Show predicted keypoints")
+    parser.add_argument("--show_indices", action="store_true", help="Show keypoint indices as labels")
     parser.add_argument("--camera_idx", type=int, default=0, help="Camera index to visualize (when --single_camera is used)")
     parser.add_argument("--single_camera", action="store_true", help="Show only single camera view instead of all 4 cameras")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -506,7 +519,8 @@ def main():
         show_gt=args.show_gt,
         show_predictions=args.show_predictions,
         camera_idx=args.camera_idx,
-        show_all_cameras=not args.single_camera
+        show_all_cameras=not args.single_camera,
+        show_indices=args.show_indices
     )
 
 
