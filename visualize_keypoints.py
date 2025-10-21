@@ -107,7 +107,7 @@ def draw_hand_skeleton(image: np.ndarray, keypoints_2d: np.ndarray, color: Tuple
     """
     if len(keypoints_2d) == 0:
         return image
-    
+ 
     image = image.copy()
     
     # Draw keypoints
@@ -358,7 +358,8 @@ def visualize_video_with_keypoints(
     camera_idx: int = 0,
     show_all_cameras: bool = True,
     show_indices: bool = False,
-    hand_filter: str = "both"
+    hand_filter: str = "both",
+    max_views: int = 2
 ):
     """
     Visualize hand keypoints on video frames.
@@ -374,6 +375,7 @@ def visualize_video_with_keypoints(
         show_all_cameras: Whether to show all camera views in a 4-panel layout
         show_indices: Whether to show keypoint indices as labels
         hand_filter: Which hands to show ("left", "right", or "both")
+        max_views: Maximum number of camera views to use for tracking (1=single-view, 2=multi-view)
     """
     logger.info(f"Processing video: {video_path}")
     
@@ -404,10 +406,12 @@ def visualize_video_with_keypoints(
         try:
             model = load_pretrained_model(model_path)
             model.eval()
-            tracker = HandTracker(model, HandTrackerOpts())
+            tracker_opts = HandTrackerOpts(max_view_num=max_views)
+            tracker = HandTracker(model, tracker_opts)
             # Initialize tracking result storage for temporal consistency
             tracker._last_tracking_result = None
             logger.info(f"Loaded model from: {model_path}")
+            logger.info(f"Using max_views={max_views} ({'single-view' if max_views == 1 else 'multi-view'})")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             model = None
@@ -514,6 +518,7 @@ def main():
     parser.add_argument("--hand_filter", choices=["left", "right", "both"], default="both", help="Which hands to visualize")
     parser.add_argument("--camera_idx", type=int, default=0, help="Camera index to visualize (when --single_camera is used)")
     parser.add_argument("--single_camera", action="store_true", help="Show only single camera view instead of all 4 cameras")
+    parser.add_argument("--max_views", type=int, default=2, choices=[1, 2, 3, 4], help="Maximum number of camera views to use for tracking (1=single-view, 2=multi-view, default: 2)")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     
     args = parser.parse_args()
@@ -534,6 +539,7 @@ def main():
             suffix_parts.append("gt")
         if args.show_predictions:
             suffix_parts.append("pred")
+            suffix_parts.append(f"{args.max_views}v")  # Add view count (e.g., "1v" for single-view, "2v" for multi-view)
         if not args.single_camera:
             suffix_parts.append("4cam")
         else:
@@ -557,7 +563,8 @@ def main():
         camera_idx=args.camera_idx,
         show_all_cameras=not args.single_camera,
         show_indices=args.show_indices,
-        hand_filter=args.hand_filter
+        hand_filter=args.hand_filter,
+        max_views=args.max_views
     )
 
 

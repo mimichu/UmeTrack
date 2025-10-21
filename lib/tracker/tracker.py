@@ -49,6 +49,8 @@ class HandTrackerOpts:
     use_stored_pose_for_crop: bool = True
     hand_ratio_in_crop: float = 0.95
     min_required_vis_landmarks: int = 19
+    max_view_num: int = 2  # Maximum number of camera views to use (1=single-view, 2=multi-view)
+    min_required_vis_landmarks_single_view: int = 10  # Relaxed threshold for single-view mode
 
 
 def _warp_image(
@@ -93,6 +95,8 @@ class HandTracker:
         self._enable_memory = opts.enable_memory
         self._hand_ratio_in_crop: float = opts.hand_ratio_in_crop
         self._min_required_vis_landmarks: int = opts.min_required_vis_landmarks
+        self._max_view_num: int = opts.max_view_num
+        self._min_required_vis_landmarks_single_view: int = opts.min_required_vis_landmarks_single_view
         self._valid_tracking_history = np.zeros(2, dtype=bool)
 
     def reset_history(self) -> None:
@@ -113,6 +117,8 @@ class HandTracker:
         for hand_idx, gt_hand_pose in gt_tracking.items():
             if gt_hand_pose.hand_confidence < CONFIDENCE_THRESHOLD:
                 continue
+            # Use relaxed visibility threshold for single-view mode
+            min_vis_landmarks = self._min_required_vis_landmarks_single_view if self._max_view_num == 1 else self._min_required_vis_landmarks
             crop_cameras[hand_idx] = gen_crop_cameras_from_pose(
                 cameras,
                 camera_angles,
@@ -121,11 +127,11 @@ class HandTracker:
                 hand_idx,
                 self._num_crop_points,
                 self._input_size,
-                max_view_num=MAX_VIEW_NUM,
+                max_view_num=self._max_view_num,
                 sort_camera_index=True,
                 focal_multiplier=self._hand_ratio_in_crop,
                 mirror_right_hand=True,
-                min_required_vis_landmarks=self._min_required_vis_landmarks,
+                min_required_vis_landmarks=min_vis_landmarks,
             )
 
         # Remove empty crop_cameras
