@@ -15,7 +15,7 @@ from typing import Optional, Tuple
 import argparse
 from lib.models.model_loader import load_pretrained_model
 from lib.tracker.tracker import HandTracker, HandTrackerOpts, InputFrame
-from lib.tracker.video_pose_data import SyncedImagePoseStream, _load_json, load_hand_model_from_dict
+from lib.tracker.video_pose_data import SyncedImagePoseStream, ImageSequencePoseStream, _load_json, load_hand_model_from_dict
 
 logging.basicConfig(level = logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,21 +27,22 @@ def _find_input_output_files(input_file: str, output_dir: str):
     return input_full_path, output_full_path
 
 def _track_sequence_and_calibrate(
-    image_pose_stream: SyncedImagePoseStream,
+    image_pose_stream: SyncedImagePoseStream | ImageSequencePoseStream,
     tracker: HandTracker,
     generic_hand_model: HandModel,
     n_calibration_samples: int,
 ):
     predicted_scale_samples = []
+    
     for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
-        gt_hand_model = image_pose_stream._hand_pose_labels.hand_model
         crop_cameras = tracker.gen_crop_cameras(
             [view.camera for view in input_frame.views],
             image_pose_stream._hand_pose_labels.camera_angles,
-            gt_hand_model,
+            generic_hand_model,
             gt_tracking,
-            min_num_crops=2,
+            min_num_crops=1,
         )
+ 
         res = tracker.track_frame_and_calibrate_scale(input_frame, crop_cameras)
         for hand_idx in res.hand_poses.keys():
             predicted_scale_samples.append(res.predicted_scales[hand_idx])
@@ -64,6 +65,7 @@ def _track_sequence(
     generic_hand_model: HandModel,
     n_calibration_samples: int,
     override: bool = False,
+    json_path: str = None,
 ) -> Optional[None]:
     try:
         data_path, output_path = input_output
@@ -74,14 +76,42 @@ def _track_sequence(
         logger.info(f"Processing {data_path}...")
         model = load_pretrained_model(model_path)
         model.eval()
-
-        image_pose_stream = SyncedImagePoseStream(data_path)
+        
+        if data_path.endswith(".mp4"):
+            image_pose_stream = SyncedImagePoseStream(data_path)
+        elif os.path.isdir(data_path):
+            # For directory input, try to detect ZED stereo format
+            # Look for _left/_right pattern or check parent directory
+            left_dir = None
+            right_dir = None
+            # Check if directory ends with _left
+            if data_path.endswith("_left"):
+                left_dir = data_path
+                base_dir = data_path[:-5]  # Remove "_left"
+                right_dir = base_dir + "_right"
+                image_pose_stream = ImageSequencePoseStream(left_dir, right_dir, json_path = json_path, image_format = "png")
+           
+            # Find JSON file - check same directory, parent, or with base name
+            base_path = left_dir.replace("_left", "")
+            possible_json_paths = [
+                os.path.join(os.path.dirname(left_dir), os.path.basename(base_path) + ".json"),
+                os.path.join(left_dir, "..", os.path.basename(base_path) + ".json"),
+                os.path.join(left_dir, "camera_params.json"),
+                os.path.join(os.path.dirname(left_dir), "camera_params.json"),
+            ]
+            
+            for json_candidate in possible_json_paths:
+                json_candidate = os.path.abspath(json_candidate)  # Normalize path
+                if os.path.exists(json_candidate):
+                    json_path = json_candidate
+                    break
+        else:
+            raise ValueError(f"Invalid input file: {data_path}. Must be .mp4 file or directory")
   
         # Skip processing if the video stream is invalid
         if len(image_pose_stream) == 0:
             logger.info(f"Skipping {data_path} due to invalid video file")
-            return None
-
+            return None 
         tracker = HandTracker(model, HandTrackerOpts())
         calibrated_hand_model = _track_sequence_and_calibrate(
             image_pose_stream, tracker, generic_hand_model, n_calibration_samples
@@ -89,7 +119,6 @@ def _track_sequence(
 
         # Reset the history and retrack using the calibrated skeleton.
         tracker.reset_history()
-
         tracked_keypoints = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
         valid_tracking = np.zeros([NUM_HANDS, len(image_pose_stream)], dtype=bool)
         
@@ -109,7 +138,7 @@ def _track_sequence(
                     calibrated_hand_model, res.hand_poses[hand_idx], hand_idx
                 )
                 valid_tracking[hand_idx, frame_idx] = True
-
+ 
         if not fs.exists(fs.dirname(output_path)):
             os.makedirs(fs.dirname(output_path))
         with fs.open(output_path, "wb") as fp:
@@ -146,6 +175,8 @@ def main():
     default_output = os.path.join(root, "zed_pred")
     parser.add_argument('--output-dir', type=str, default=default_output,
                         help='Path to the output directory')
+    parser.add_argument('--json-path', type=str, default=None,
+                        help='Path to the JSON file with camera parameters')
     args = parser.parse_args()
     
     if not os.path.exists(args.input_file):
@@ -167,7 +198,8 @@ def main():
         _track_sequence,
         model_path=args.model_path,
         generic_hand_model=generic_hand_model,
-        n_calibration_samples=args.n_calibration_samples
+        n_calibration_samples=args.n_calibration_samples,
+        json_path=args.json_path
     )
 
     print(f"Starting tracking on {len(input_paths)} files using {args.pool_size} workers...")

@@ -98,24 +98,72 @@ class HandTracker:
         self._max_view_num: int = opts.max_view_num
         self._min_required_vis_landmarks_single_view: int = opts.min_required_vis_landmarks_single_view
         self._valid_tracking_history = np.zeros(2, dtype=bool)
+        self._use_stored_pose_for_crop: bool = opts.use_stored_pose_for_crop
+        self._last_tracking_result: Optional[TrackingResult] = None
 
     def reset_history(self) -> None:
         self._valid_tracking_history[:] = False
+        self._last_tracking_result = None
+    
+    def _generate_default_poses(self) -> Dict[int, SingleHandPose]:
+        """
+        Generate default hand poses for bootstrapping tracking when no ground truth
+        or previous tracking is available. Places hands at reasonable default positions.
+        """
+        from lib.common.hand import NUM_JOINTS_PER_HAND
+        
+        default_poses = {}
+        for hand_idx in range(NUM_HANDS):
+            # Place hand at center of scene, slightly forward
+            default_wrist_xform = np.eye(4, dtype=np.float32)
+            default_wrist_xform[2, 3] = 500.0  # 500mm forward from camera
+            if hand_idx == 1:  # Right hand
+                default_wrist_xform[0, 3] = 100.0  # 100mm to the right
+            else:  # Left hand
+                default_wrist_xform[0, 3] = -100.0  # 100mm to the left
+            
+            default_pose = SingleHandPose(
+                joint_angles=np.zeros(NUM_JOINTS_PER_HAND, dtype=np.float32),  # Neutral pose
+                wrist_xform=default_wrist_xform,
+                hand_confidence=0.8  # High enough to pass threshold
+            )
+            default_poses[hand_idx] = default_pose
+        
+        return default_poses
 
     def gen_crop_cameras(
         self,
         cameras: List[camera.CameraModel],
         camera_angles: List[float],
         hand_model: HandModel,
-        gt_tracking: Dict[int, SingleHandPose],
+        gt_tracking: Optional[Dict[int, SingleHandPose]],
         min_num_crops: int,
     ) -> Dict[int, Dict[int, camera.PinholePlaneCameraModel]]:
         crop_cameras: Dict[int, Dict[int, camera.PinholePlaneCameraModel]] = {}
-        if not gt_tracking:
+        
+        # Determine which poses to use for generating crop cameras
+        poses_to_use = {}
+        
+        # First, try to use ground truth tracking if available
+        if gt_tracking:
+            poses_to_use = gt_tracking
+        # If no ground truth and we should use stored poses, use previous tracking result
+        elif self._use_stored_pose_for_crop and self._last_tracking_result:
+            poses_to_use = self._last_tracking_result.hand_poses
+            if poses_to_use:
+                logger.debug(f"Using stored pose from previous frame for crop camera generation (hands: {list(poses_to_use.keys())})")
+        
+        # Bootstrap: If no poses available and we're in inference mode, try default pose
+        if not poses_to_use and self._use_stored_pose_for_crop:
+            logger.info("No ground truth or previous tracking available. Attempting bootstrap with default hand pose.")
+            poses_to_use = self._generate_default_poses()
+        
+        # If still no poses available, return empty crop cameras
+        if not poses_to_use:
             return crop_cameras
 
-        for hand_idx, gt_hand_pose in gt_tracking.items():
-            if gt_hand_pose.hand_confidence < CONFIDENCE_THRESHOLD:
+        for hand_idx, hand_pose in poses_to_use.items():
+            if hand_pose.hand_confidence < CONFIDENCE_THRESHOLD:
                 continue
             # Use relaxed visibility threshold for single-view mode
             min_vis_landmarks = self._min_required_vis_landmarks_single_view if self._max_view_num == 1 else self._min_required_vis_landmarks
@@ -123,7 +171,7 @@ class HandTracker:
                 cameras,
                 camera_angles,
                 hand_model,
-                gt_hand_pose,
+                hand_pose,
                 hand_idx,
                 self._num_crop_points,
                 self._input_size,
@@ -141,7 +189,7 @@ class HandTracker:
                 del_list.append(hand_idx)
         for hand_idx in del_list:
             del crop_cameras[hand_idx]
-
+ 
         return crop_cameras
 
     def track_frame(
@@ -153,7 +201,9 @@ class HandTracker:
         if not crop_cameras:
             # Frame without hands
             self.reset_history()
-            return TrackingResult()
+            result = TrackingResult()
+            # Don't store empty results - they won't help bootstrap
+            return result
 
         frame_data, frame_desc, skeleton_data = self._make_inputs(
             sample, hand_model, crop_cameras
@@ -171,6 +221,13 @@ class HandTracker:
             frame_desc.hand_idx.cpu().numpy(),
             crop_cameras,
         )
+        
+        # Store tracking result for use in next frame if enabled
+        # Only store if we actually have hand poses (not empty)
+        if self._use_stored_pose_for_crop and tracking_result.hand_poses:
+            self._last_tracking_result = tracking_result
+            logger.debug(f"Stored tracking result for {len(tracking_result.hand_poses)} hand(s) for next frame")
+        
         return tracking_result
 
     def track_frame_and_calibrate_scale(
@@ -181,7 +238,9 @@ class HandTracker:
         if not crop_cameras:
             # Frame without hands
             self.reset_history()
-            return TrackingResult()
+            result = TrackingResult()
+            # Don't store empty results - they won't help bootstrap
+            return result
         frame_data, frame_desc, _ = self._make_inputs(sample, None, crop_cameras)
 
         with torch.no_grad():
@@ -195,6 +254,13 @@ class HandTracker:
             frame_desc.hand_idx.cpu().numpy(),
             crop_cameras,
         )
+        
+        # Store tracking result for use in next frame if enabled
+        # Only store if we actually have hand poses (not empty)
+        if self._use_stored_pose_for_crop and tracking_result.hand_poses:
+            self._last_tracking_result = tracking_result
+            logger.debug(f"Stored tracking result for {len(tracking_result.hand_poses)} hand(s) for next frame")
+        
         return tracking_result
 
     def _make_inputs(
@@ -289,7 +355,7 @@ class HandTracker:
             if hand_valid:
                 continue
             self._valid_tracking_history[hand_idx] = False
-
+        
         return TrackingResult(
             hand_poses=hand_poses,
             num_views=num_views,
