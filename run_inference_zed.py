@@ -2,8 +2,8 @@
 
 import logging
 import os
+import sys
 import fnmatch
-import pickle
 import numpy as np
 import lib.data_utils.fs as fs
 from functools import partial
@@ -19,7 +19,6 @@ from lib.tracker.video_pose_data import SyncedImagePoseStream, ImageSequencePose
 
 logging.basicConfig(level = logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 def _find_input_output_files(input_file: str, output_dir: str):
     input_full_path = [fs.join(input_file)]
@@ -141,14 +140,15 @@ def _track_sequence(
  
         if not fs.exists(fs.dirname(output_path)):
             os.makedirs(fs.dirname(output_path))
-        with fs.open(output_path, "wb") as fp:
-            pickle.dump(
-                {
-                    "tracked_keypoints": tracked_keypoints,
-                    "valid_tracking": valid_tracking,
-                },
-                fp,
-            )
+        
+        # Save in numpy format (.npy) which is compatible with visualize_3d_keypoints.py
+        # np.save can handle dictionaries when allow_pickle=True
+        results_dict = {
+            "tracked_keypoints": tracked_keypoints,
+            "valid_tracking": valid_tracking,
+        }
+        # Use numpy save format for compatibility with visualization script
+        np.save(output_path, results_dict, allow_pickle=True)
         logger.info(f"Results saved at {output_path}")
         return None
     except Exception as e:
@@ -177,6 +177,10 @@ def main():
                         help='Path to the output directory')
     parser.add_argument('--json-path', type=str, default=None,
                         help='Path to the JSON file with camera parameters')
+    parser.add_argument('--visualize', action='store_true',
+                        help='Automatically launch visualization after inference completes')
+    parser.add_argument('--viz-port', type=int, default=8080,
+                        help='Port for visualization server (default: 8080)')
     args = parser.parse_args()
     
     if not os.path.exists(args.input_file):
@@ -210,6 +214,73 @@ def main():
         with Pool(args.pool_size) as p:
             p.map(track_fn, zip(input_paths, output_paths))
     print("Tracking complete!")
+    
+    # Launch visualization if requested
+    if args.visualize and len(output_paths) > 0:
+        import subprocess
+        predictions_path = output_paths[0]  # Use first output file
+        
+        print(f"\n{'='*60}")
+        print(f"Launching visualization with predictions from: {predictions_path}")
+        print(f"{'='*60}\n")
+        
+        # Determine input type for visualization
+        input_file = args.input_file
+        viz_args = []
+        
+        if input_file.endswith(".mp4"):
+            viz_args = ["--video", input_file]
+        elif os.path.isdir(input_file) and input_file.endswith("_left"):
+            # ZED stereo format
+            base_dir = input_file[:-5]
+            right_dir = base_dir + "_right"
+            
+            # Find JSON file
+            json_file = args.json_path
+            if not json_file:
+                # Try to find it automatically
+                base_path = input_file.replace("_left", "")
+                possible_json_paths = [
+                    os.path.join(os.path.dirname(input_file), os.path.basename(base_path) + ".json"),
+                    os.path.join(input_file, "..", os.path.basename(base_path) + ".json"),
+                    os.path.join(input_file, "camera_params.json"),
+                    os.path.join(os.path.dirname(input_file), "camera_params.json"),
+                ]
+                for json_candidate in possible_json_paths:
+                    json_candidate = os.path.abspath(json_candidate)
+                    if os.path.exists(json_candidate):
+                        json_file = json_candidate
+                        break
+            
+            if json_file and os.path.exists(right_dir):
+                viz_args = ["--left-dir", input_file, "--right-dir", right_dir, "--json", json_file]
+            else:
+                logger.warning(f"Could not find right directory or JSON file for visualization. "
+                             f"Right dir: {right_dir}, JSON: {json_file}")
+                logger.warning("Skipping visualization.")
+                return 0
+        
+        if viz_args:
+            # Build visualization command
+            viz_script = os.path.join(root, "visualize_3d_keypoints.py")
+            cmd = [
+                sys.executable, viz_script,
+                *viz_args,
+                "--predictions", predictions_path,
+                "--port", str(args.viz_port),
+            ]
+            
+            logger.info(f"Running: {' '.join(cmd)}")
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Visualization failed: {e}")
+                return 1
+            except KeyboardInterrupt:
+                logger.info("Visualization interrupted by user")
+                return 0
+        else:
+            logger.warning("Could not determine input format for visualization. Skipping.")
 
 
 if __name__ == '__main__':
