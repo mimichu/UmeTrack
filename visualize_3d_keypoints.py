@@ -24,11 +24,10 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Dict, List
-
+from typing import Optional, Dict, List, Tuple
 import numpy as np
+from utils.color_print import debug_print
 
-# Add paths
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root / 'src'))
@@ -46,13 +45,26 @@ try:
     IMAGE_SEQUENCE_AVAILABLE = True
 except ImportError:
     IMAGE_SEQUENCE_AVAILABLE = False
+    print("Warning: Could not import ImageSequencePoseStream.")
 
 # Imports from your working script
-from lib.tracker.video_pose_data import (
-    SyncedImagePoseStream, 
-    _load_json, 
-    load_hand_model_from_dict
-)
+# Attempt to import InputFrame, handle if not present
+try:
+    from lib.tracker.video_pose_data import (
+        SyncedImagePoseStream, 
+        _load_json, 
+        load_hand_model_from_dict,
+        InputFrame
+    )
+except ImportError:
+     from lib.tracker.video_pose_data import (
+        SyncedImagePoseStream, 
+        _load_json, 
+        load_hand_model_from_dict
+    )
+     # Define a placeholder if it's not a real class
+     InputFrame = type("InputFrame", (object,), {})
+     
 from lib.tracker.perspective_crop import landmarks_from_hand_pose
 from lib.common.hand import (
     NUM_LANDMARKS_PER_HAND, 
@@ -60,7 +72,6 @@ from lib.common.hand import (
     scaled_hand_model
 )
 
-# Optional: Tracker support
 try:
     from lib.tracker.tracker import HandTracker, HandTrackerOpts
     from lib.models.model_loader import load_pretrained_model
@@ -104,7 +115,8 @@ class HandVisualization3D:
                  predictions=None, model=None, tracker: Optional[HandTracker] = None,
                  generic_hand_model: Optional[HandModel] = None,
                  show_skeleton: bool = True, show_keypoints: bool = True,
-                 show_keypoint_indices: bool = False):
+                 show_keypoint_indices: bool = False,
+                 no_precache: bool = False):
         """
         Initialize 3D visualization.
         
@@ -116,6 +128,7 @@ class HandVisualization3D:
             model: Pretrained model for tracking
             tracker: HandTracker instance
             generic_hand_model: The generic hand model for calibration
+            no_precache: If True, use on-demand caching instead of pre-caching all frames
         """
         self.stream = stream
         self.show_cameras = show_cameras
@@ -127,9 +140,12 @@ class HandVisualization3D:
         self.initial_show_keypoints = show_keypoints
         self.initial_show_keypoint_indices = show_keypoint_indices
         
+        self.no_precache = no_precache
+        self.frame_cache = {}
+        self.frame_idx = 0
+        
         self.calibrated_hand_model: Optional[HandModel] = None
         
-        # --- NEW: Perform calibration if tracker is provided ---
         if self.tracker and generic_hand_model:
             print("Calibrating tracker scale...")
             self._calibrate_tracker(generic_hand_model)
@@ -142,24 +158,90 @@ class HandVisualization3D:
                  self.calibrated_hand_model = self.stream._hand_pose_labels.hand_model
             else:
                  logger.error("Cannot get any hand model for tracker!")
-        # --- END NEW ---
 
         # Initialize viser server
         self.server = viser.ViserServer(port=port)
         print(f"🌐 Viser server started at: http://localhost:{port}")
         
         # Current frame index
-        self.frame_idx = 0
         self.playing = False
         self.playback_speed = 1.0
         
-        # Cache frames for better performance
-        self.frame_cache = {}
-        self._cache_frames()
-        
         # Setup UI controls
         self._setup_ui()
-    
+
+        if not self.no_precache:
+            self._cache_frames()
+        else:
+            print("On-demand frame caching enabled (slower first load, less RAM).")
+            # Try to get frame 0 to see if on-demand will work
+            print("  Checking stream for on-demand compatibility...")
+            self._get_frame(0)
+            if self.no_precache:
+                # If it's still true, it worked!
+                print("  ✓ Stream supports on-demand caching.")
+                print(f"  {len(self.frame_cache)} calibration frames are already cached.")
+            else:
+                # _get_frame failed and triggered a full cache
+                print(f"  ✓ Stream loaded. {len(self.frame_cache)} frames cached.")
+
+
+    # *** CHANGED: This function is now robust to non-subscriptable streams ***
+    def _get_frame(self, frame_idx: int) -> Optional[Tuple[InputFrame, Dict]]:
+        """
+        Get a frame, either from the cache or by loading it from the stream
+        (and caching it if it's not already present).
+        """
+        if frame_idx in self.frame_cache:
+            return self.frame_cache[frame_idx]
+        
+        # If not in cache, try to load it from the stream (on-demand)
+        try:
+            # This will work for SyncedImagePoseStream
+            if not (0 <= frame_idx < len(self.stream)):
+                logger.warning(f"Frame index {frame_idx} is out of range (0-{len(self.stream)-1}).")
+                return None
+            
+            frame_data = self.stream[frame_idx]
+            self.frame_cache[frame_idx] = frame_data # Store in cache
+            
+            if self.no_precache: 
+                logger.info(f"Cached frame {frame_idx} on demand.")
+                
+            return frame_data
+
+        except TypeError as e:
+            # This is the error we got!
+            if "is not subscriptable" in str(e):
+                logger.warning(
+                    f"Stream type {type(self.stream).__name__} is not 'subscriptable' "
+                    f"(no random access).\n"
+                    f"Disabling --no-precache and loading all frames now. This may take a moment."
+                )
+                # Set flag to prevent this from running again
+                self.no_precache = False 
+                
+                # Call the iterator-based caching function
+                self._cache_frames()
+                
+                # Now that cache is full, try again
+                if frame_idx in self.frame_cache:
+                    return self.frame_cache[frame_idx]
+                else:
+                    logger.error(f"Failed to load frame {frame_idx} even after full caching.")
+                    return None
+            else:
+                # Some other unexpected TypeError
+                logger.error(f"Error loading frame {frame_idx} from stream: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+        except Exception as e:
+            logger.error(f"Error loading frame {frame_idx} from stream: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def _calibrate_tracker(self, generic_hand_model: HandModel):
         """
         Runs the calibration step to find the mean hand scale.
@@ -177,9 +259,14 @@ class HandVisualization3D:
         
         try:
             for frame_idx in range(num_frames_to_iterate):
-                # We can't use the iterator if we want to reset it later
-                # So we manually get items.
-                input_frame, gt_tracking = self.stream[frame_idx]
+                # Use _get_frame to either retrieve from cache or load and cache
+                # This will trigger the full cache if the stream is not subscriptable
+                frame_data = self._get_frame(frame_idx)
+                if frame_data is None:
+                    logger.warning(f"Skipping calibration frame {frame_idx}, could not load.")
+                    continue
+                
+                input_frame, gt_tracking = frame_data
                 
                 gt_hand_model = self.stream._hand_pose_labels.hand_model
                 crop_cameras = self.tracker.gen_crop_cameras(
@@ -209,12 +296,14 @@ class HandVisualization3D:
             traceback.print_exc()
             self.calibrated_hand_model = generic_hand_model
 
+    # *** CHANGED: This function now uses an iterator, which is compatible with all streams ***
     def _cache_frames(self):
-        """Cache all frames for faster access."""
+        """Cache all frames for faster access using an iterator."""
         print("Caching frames for faster visualization...")
         try:
-            for idx, (input_frame, gt_tracking) in enumerate(self.stream):
-                self.frame_cache[idx] = (input_frame, gt_tracking)
+            # Use iterator, which works for both stream types
+            for idx, frame_data in enumerate(self.stream):
+                self.frame_cache[idx] = frame_data
                 if (idx + 1) % 50 == 0:
                     print(f"  Cached {idx + 1}/{len(self.stream)} frames...")
             print(f"✓ Cached {len(self.frame_cache)} frames")
@@ -340,7 +429,9 @@ class HandVisualization3D:
             return
         
         base_color = HAND_COLORS[hand_idx]
-        color = tuple(c * m for c, m in zip(base_color, color_modifier))
+        color_tuple = tuple(c * m for c, m in zip(base_color, color_modifier))
+        
+        debug_print(f"color_tuple: {color_tuple}")
         
         # Determine scale based on coordinate magnitude
         coord_magnitude = np.abs(landmarks_3d).max()
@@ -357,18 +448,18 @@ class HandVisualization3D:
 
         # Draw keypoints
         if self.show_keypoints_checkbox.value:
-            self.server.add_point_cloud(
+            self.server.scene.add_point_cloud(
                 name=f"/{prefix}/hand_{hand_idx}/keypoints",
                 points=landmarks_3d,
-                colors=np.tile(color, (NUM_LANDMARKS_PER_HAND, 1)),
-                point_size=point_radius,
+                colors=color_tuple,
+                point_size=0.5,
             )
                 
             # Add keypoint index labels if enabled
             if self.show_keypoint_indices_checkbox.value:
                 for idx, point in enumerate(landmarks_3d):
                     label_offset = point_radius * 2.0
-                    self.server.add_label(
+                    self.server.scene.add_label(
                         name=f"/{prefix}/hand_{hand_idx}/label_{idx}",
                         text=str(idx),
                         position=tuple((point + np.array([label_offset, label_offset, label_offset])).tolist()),
@@ -382,14 +473,13 @@ class HandVisualization3D:
                     bone_segments.append(
                         [landmarks_3d[start_idx], landmarks_3d[end_idx]]
                     )
-            
+ 
             if bone_segments:
-                self.server.add_spline_catmull_rom(
+                self.server.scene.add_line_segments(
                     name=f"/{prefix}/hand_{hand_idx}/skeleton",
-                    positions=np.array(bone_segments),
-                    color=color,
+                    points=np.array(bone_segments),
+                    colors=color_tuple, # Color per segment
                     line_width=line_width,
-                    segments_per_spline=2, # Straight lines
                 )
     
     def draw_cameras(self, input_frame):
@@ -411,8 +501,6 @@ class HandVisualization3D:
             position = c2w[:3, 3]
             rotation_matrix = c2w[:3, :3]
             
-            # print(f"  Camera {cam_idx} position: {position}")
-            
             # Determine scale based on position magnitude
             pos_magnitude = np.abs(position).max()
             if pos_magnitude > 10:  # Likely in millimeters
@@ -423,7 +511,7 @@ class HandVisualization3D:
             # Add camera frustum
             frustum_color = (1.0, 0.5, 0.0) if cam_idx == 0 else (1.0, 0.0, 0.5)
             
-            self.server.add_frame(
+            self.server.scene.add_frame(
                 name=f"/cameras/camera_{cam_idx}",
                 position=position,
                 wxyz=viser.transforms.SO3.from_matrix(rotation_matrix).wxyz,
@@ -432,7 +520,7 @@ class HandVisualization3D:
             )
             
             # Add camera label
-            self.server.add_label(
+            self.server.scene.add_label(
                 name=f"/cameras/camera_{cam_idx}_label",
                 text=f"Camera {cam_idx}",
                 position=tuple(position),
@@ -441,16 +529,15 @@ class HandVisualization3D:
     def update_visualization(self):
         """Update visualization for current frame."""
         # Clear previous frame
-        self.server.reset_scene()
+        self.server.scene.reset()
         
-        # Get frame data from cache
-        if self.frame_idx not in self.frame_cache:
-            logger.warning(f"Frame {self.frame_idx} not in cache")
+        # Get frame data from cache or stream
+        frame_data = self._get_frame(self.frame_idx)
+        if frame_data is None:
+            logger.warning(f"Frame {self.frame_idx} could not be loaded.")
             return
         
-        input_frame, gt_tracking = self.frame_cache[self.frame_idx]
-        
-        # print(f"Frame {self.frame_idx}: {len(gt_tracking)} hands detected")
+        input_frame, gt_tracking = frame_data
 
         # Draw ground truth
         if self.show_gt_checkbox.value and gt_tracking:
@@ -466,8 +553,6 @@ class HandVisualization3D:
                         landmarks_world = landmarks_from_hand_pose(
                             hand_model, gt_hand_pose, hand_idx
                         )
-                        # print(f"  Hand {hand_idx}: {landmarks_world.shape} landmarks")
-                        # print(f"    Range: [{landmarks_world.min():.3f}, {landmarks_world.max():.3f}]")
                         
                         self.draw_hand_skeleton(
                             landmarks_world, hand_idx, 
@@ -489,18 +574,23 @@ class HandVisualization3D:
                 # Note: The predictions file might be from your first script
                 # Let's check for 'tracked_keypoints'
                 if 'tracked_keypoints' in self.predictions:
-                    valid_tracking = self.predictions['valid_tracking'][:, self.frame_idx]
-                    for hand_idx, is_valid in enumerate(valid_tracking):
-                        if is_valid:
-                            pred_keypoints_3d = self.predictions['tracked_keypoints'][hand_idx, self.frame_idx]
-                            self.draw_hand_skeleton(
-                                pred_keypoints_3d, hand_idx,
-                                prefix="pred",
-                                color_modifier=(1.0, 1.0, 1.0) # Bright
-                            )
+                    if self.frame_idx >= self.predictions['tracked_keypoints'].shape[1]:
+                        logger.warning(f"Frame index {self.frame_idx} out of bounds for 'tracked_keypoints' (len: {self.predictions['tracked_keypoints'].shape[1]})")
+                    else:
+                        valid_tracking = self.predictions['valid_tracking'][:, self.frame_idx]
+                        for hand_idx, is_valid in enumerate(valid_tracking):
+                            if is_valid:
+                                pred_keypoints_3d = self.predictions['tracked_keypoints'][hand_idx, self.frame_idx]
+                                self.draw_hand_skeleton(
+                                    pred_keypoints_3d, hand_idx,
+                                    prefix="pred_file", # Use a different prefix
+                                    color_modifier=(1.0, 1.0, 1.0) # Bright
+                                )
                 # Fallback for 'tracked_hands' format
                 elif 'tracked_hands' in self.predictions:
-                    if not hasattr(self.stream, '_hand_pose_labels'):
+                    if self.frame_idx >= len(self.predictions['tracked_hands']):
+                         logger.warning(f"Frame index {self.frame_idx} out of bounds for 'tracked_hands' (len: {len(self.predictions['tracked_hands'])})")
+                    elif not hasattr(self.stream, '_hand_pose_labels'):
                          logger.warning("Need hand model from stream to visualize 'tracked_hands' predictions.")
                     else:
                         hand_model = self.stream._hand_pose_labels.hand_model
@@ -511,12 +601,12 @@ class HandVisualization3D:
                             )
                             self.draw_hand_skeleton(
                                 pred_keypoints_3d, hand_idx,
-                                prefix="pred",
+                                prefix="pred_file", # Use a different prefix
                                 color_modifier=(1.0, 1.0, 1.0) # Bright
                             )
 
             # --- Path 2: Run live tracking (CORRECTED) ---
-            elif self.tracker is not None:
+            if self.tracker is not None:
                 if self.calibrated_hand_model is None:
                     logger.error(f"Frame {self.frame_idx}: Tracker is loaded but calibrated_hand_model is missing. Cannot predict.")
                 else:
@@ -546,10 +636,12 @@ class HandVisualization3D:
                             pred_keypoints_3d = landmarks_from_hand_pose(
                                 self.calibrated_hand_model, pred_pose, hand_idx
                             )
+                            # Use a different color/modifier if you want to distinguish
+                            # Here we just use a different prefix
                             self.draw_hand_skeleton(
                                 pred_keypoints_3d, hand_idx,
-                                prefix="pred",
-                                color_modifier=(1.0, 1.0, 1.0) # Bright
+                                prefix="pred_live",
+                                color_modifier=(1.0, 0.5, 0.0) # e.g., Orange for live
                             )
                     except Exception as e:
                         logger.error(f"Could not run tracker: {e}")
@@ -564,14 +656,17 @@ class HandVisualization3D:
         axes_scale = 0.1 # 10cm
         # Check coordinates to guess scale
         if self.show_gt_checkbox.value and gt_tracking:
-             hand_model = self.stream._hand_pose_labels.hand_model
-             landmarks_world = landmarks_from_hand_pose(
-                    hand_model, next(iter(gt_tracking.values())), 0
-             )
-             if np.abs(landmarks_world).max() > 10:
-                 axes_scale = 50.0 # 50mm
+            try:
+                hand_model = self.stream._hand_pose_labels.hand_model
+                landmarks_world = landmarks_from_hand_pose(
+                        hand_model, next(iter(gt_tracking.values())), 0
+                )
+                if np.abs(landmarks_world).max() > 10:
+                    axes_scale = 50.0 # 50mm
+            except Exception:
+                pass # Keep default scale if error
 
-        self.server.add_frame(
+        self.server.scene.add_frame(
             name="/world_origin",
             axes_length=axes_scale,
             axes_radius=axes_scale * 0.05,
@@ -586,12 +681,11 @@ class HandVisualization3D:
             grid_points.append([[i, -grid_size, 0], [i, grid_size, 0]])
             grid_points.append([[-grid_size, i, 0], [grid_size, i, 0]])
         
-        self.server.add_spline_catmull_rom(
+        self.server.scene.add_line_segments(
             name="/grid",
-            positions=np.array(grid_points),
-            color=(0.3, 0.3, 0.3),
+            points=np.array(grid_points),
+            colors=(0.3, 0.3, 0.3), # Color per segment
             line_width=axes_scale * 0.01,
-            segments_per_spline=2, # Straight lines
         )
     
     def run(self):
@@ -626,8 +720,13 @@ class HandVisualization3D:
                     # Advance frame based on speed
                     if dt >= (1.0 / (30.0 * self.playback_speed)):
                         self.frame_idx = (self.frame_idx + 1) % len(self.stream)
-                        self.frame_slider.value = self.frame_idx
-                        self.update_visualization()
+                        # Check if slider value changed to avoid redundant updates
+                        if self.frame_slider.value != self.frame_idx:
+                            self.frame_slider.value = self.frame_idx
+                        else:
+                            # If slider was already at this value (eg. loop)
+                            # we still need to trigger the update
+                            self.update_visualization()
                         last_frame_time = current_time
         
         except KeyboardInterrupt:
@@ -685,11 +784,12 @@ Examples:
                        help='Optional: .npy file with eval_results (e.g., tracked_keypoints)')
     parser.add_argument('--model', '-m',
                        help='Optional: Pretrained model path for live tracking')
+    root = os.path.dirname(__file__)
     
-    # --- NEW ARGUMENT ---
-    parser.add_argument('--generic-hand-model', 
-                       help='Path to generic_hand_model.json (REQUIRED for live tracking with --model)')
+    default_hand_model = os.path.join(root, "dataset", "generic_hand_model.json")
     
+    parser.add_argument('--generic-hand-model', type=str, default=default_hand_model,
+                        help='Path to the generic hand model')
     # Display options
     parser.add_argument('--no-cameras', action='store_true',
                        help='Hide camera visualizations')
@@ -699,6 +799,9 @@ Examples:
                        help='Hide keypoint spheres')
     parser.add_argument('--show-indices', action='store_true',
                        help='Show keypoint indices (0-20) as labels')
+    
+    parser.add_argument('--no-precache', action='store_true',
+                       help='Disable pre-caching all frames (use on-demand caching to save RAM)')
     
     # Server options
     parser.add_argument('--port', type=int, default=8080,
@@ -737,10 +840,6 @@ Examples:
     if args.model and not args.generic_hand_model:
         parser.error("--generic-hand-model is required when using --model for live tracking.")
     
-    if args.predictions and args.model:
-        logger.warning("Both --predictions and --model provided. --predictions will be used, and live tracking will be disabled.")
-        args.model = None # Disable live tracking
-
     # Determine input format and load stream
     stream = None
     
@@ -770,11 +869,22 @@ Examples:
             return 1
         
         left_dir, right_dir, json_path = args.image_sequence
-        # (Expand user paths logic from original script) ...
+        left_dir = os.path.expanduser(left_dir)
+        right_dir = os.path.expanduser(right_dir)
+        json_path = os.path.expanduser(json_path)
+
+        if not os.path.exists(left_dir): print(f"Error: Left directory not found: {left_dir}"); return 1
+        if not os.path.exists(right_dir): print(f"Error: Right directory not found: {right_dir}"); return 1
+        if not os.path.exists(json_path): print(f"Error: JSON file not found: {json_path}"); return 1
         
         print("Loading ZED image sequence...")
         stream = ImageSequencePoseStream(left_dir, right_dir, json_path)
-        # (Validation logic from original script) ...
+        
+        if len(stream) == 0:
+            print("Error: No frames found in stream")
+            return 1
+        
+        print(f"  Total frames: {len(stream)}")
     
     # Check for individual arguments format
     elif has_left_right_json:
@@ -787,7 +897,6 @@ Examples:
         right_dir = os.path.expanduser(args.right_dir)
         json_path = os.path.expanduser(args.json)
         
-        # (Validation logic from original script) ...
         if not os.path.exists(left_dir): print(f"Error: Left directory not found: {left_dir}"); return 1
         if not os.path.exists(right_dir): print(f"Error: Right directory not found: {right_dir}"); return 1
         if not os.path.exists(json_path): print(f"Error: JSON file not found: {json_path}"); return 1
@@ -841,7 +950,7 @@ Examples:
                     print("✓ Tracker initialized")
                     
                     print(f"Loading generic hand model from: {generic_hand_model_path}")
-                    generic_hand_model = load_hand_model_from_dict(_load_json(generic_hand_model_path))
+                    generic_hand_model = load_hand_model_from_dict(_load_json(args.generic_hand_model)["hand_model"])
                     print("✓ Generic hand model loaded")
                     
                 except Exception as e:
@@ -868,6 +977,7 @@ Examples:
         show_skeleton=not args.no_skeleton,
         show_keypoints=not args.no_keypoints,
         show_keypoint_indices=args.show_indices,
+        no_precache=args.no_precache,
     )
     viz.run()
     
