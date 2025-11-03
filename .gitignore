@@ -1,4 +1,5 @@
 **/__pycache__
 tmp
 **/pred
+*.npy
 UmeTrack_data/
