@@ -34,15 +34,21 @@ def _track_sequence_and_calibrate(
     predicted_scale_samples = []
     
     for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
+        # Only use left camera (index 0) for prediction
+        left_view_only = [input_frame.views[0]] if input_frame.views else []
+        
         crop_cameras = tracker.gen_crop_cameras(
-            [view.camera for view in input_frame.views],
-            image_pose_stream._hand_pose_labels.camera_angles,
+            [view.camera for view in left_view_only],
+            [image_pose_stream._hand_pose_labels.camera_angles[0]],  # Only left camera angle
             generic_hand_model,
             gt_tracking,
             min_num_crops=1,
         )
  
-        res = tracker.track_frame_and_calibrate_scale(input_frame, crop_cameras)
+        # Create a new InputFrame with only the left view
+        input_frame_left = InputFrame(views=left_view_only)
+        
+        res = tracker.track_frame_and_calibrate_scale(input_frame_left, crop_cameras)
         for hand_idx in res.hand_poses.keys():
             predicted_scale_samples.append(res.predicted_scales[hand_idx])
         if n_calibration_samples != 0 and len(predicted_scale_samples) >= n_calibration_samples:
@@ -132,6 +138,7 @@ def _track_sequence(
                 min_num_crops=1,
             )
             res = tracker.track_frame(input_frame, calibrated_hand_model, crop_cameras)
+
             if not input_frame.views:
                 logger.warning(f"No views in frame {frame_idx}, skipping...")
                 continue
@@ -141,38 +148,40 @@ def _track_sequence(
             
             # T_cam_world is the transform from world points to camera points
             T_cam_world = np.linalg.inv(T_world_cam)
+            
+            # Define 180-degree rotation matrix around X-axis
+            # This transforms from (+Y Up, +Z Back) to (+Y Down, +Z Fwd)
+            R_Y_flip = np.array([
+                [1.0,  0.0,  0.0],
+                [0.0, -1.0,  0.0],  # Flips Y
+                [0.0,  0.0,  1.0]   # Z remains forward
+            ])
+            # --- [END FIX] ---
 
             for hand_idx in res.hand_poses.keys():
+                
                 # 1. Get keypoints in UmeTrack's World Frame
                 keypoints_world = landmarks_from_hand_pose(
                     calibrated_hand_model, res.hand_poses[hand_idx], hand_idx
                 )
                 
-                # 2. Convert to homogeneous coordinates (N, 4)
+                # 2. Convert to homogeneous coordinates
                 num_keypoints = keypoints_world.shape[0]
                 ones = np.ones((num_keypoints, 1))
                 keypoints_world_homog = np.hstack((keypoints_world, ones))
                 
-                # 3. Apply the T_cam_world transformation
-                # (N, 4) = (N, 4) @ (4, 4).T
+                # 3. Apply T_cam_world to move from World to Camera frame
                 keypoints_cam_homog = keypoints_world_homog @ T_cam_world.T
                 
                 # 4. Convert back to (N, 3)
                 keypoints_cam = keypoints_cam_homog[:, :3]
                 
-                # 5. Flip Z-axis to match FoundationStereo (+Z Forward)
-                # UmeTrack/OpenXR is +Z backward, FoundationStereo is +Z forward
-                keypoints_foundation_frame = keypoints_cam
-                R_x_180 = np.array([
-                                    [1.0,  0.0,  0.0],
-                                    [0.0, -1.0,  0.0],
-                                    [0.0,  0.0, -1.0]
-                                ])
+                # 5. Apply rotation to switch coordinate conventions
+                keypoints_zed_image_frame = keypoints_cam @ R_Y_flip
                 
-                # Apply the rotation: (N, 3) = (N, 3) @ (3, 3)
-                keypoints_zed_image_frame = keypoints_cam @ R_x_180
-                tracked_keypoints[hand_idx, frame_idx] = keypoints_foundation_frame
-
+                # 6. Save the correctly transformed keypoints
+                tracked_keypoints[hand_idx, frame_idx] = keypoints_zed_image_frame
+                
                 valid_tracking[hand_idx, frame_idx] = True
  
         if not fs.exists(fs.dirname(output_path)):
