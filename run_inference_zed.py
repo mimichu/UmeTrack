@@ -16,7 +16,7 @@ import argparse
 from lib.models.model_loader import load_pretrained_model
 from lib.tracker.tracker import HandTracker, HandTrackerOpts, InputFrame
 from lib.tracker.video_pose_data import SyncedImagePoseStream, ImageSequencePoseStream, _load_json, load_hand_model_from_dict
-
+from typing import Union
 logging.basicConfig(level = logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def _find_input_output_files(input_file: str, output_dir: str):
     return input_full_path, output_full_path
 
 def _track_sequence_and_calibrate(
-    image_pose_stream: SyncedImagePoseStream | ImageSequencePoseStream,
+    image_pose_stream: Union[SyncedImagePoseStream, ImageSequencePoseStream],
     tracker: HandTracker,
     generic_hand_model: HandModel,
     n_calibration_samples: int,
@@ -123,6 +123,7 @@ def _track_sequence(
         
         for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
             gt_hand_model = image_pose_stream._hand_pose_labels.hand_model
+
             crop_cameras = tracker.gen_crop_cameras(
                 [view.camera for view in input_frame.views],
                 image_pose_stream._hand_pose_labels.camera_angles,
@@ -131,11 +132,41 @@ def _track_sequence(
                 min_num_crops=1,
             )
             res = tracker.track_frame(input_frame, calibrated_hand_model, crop_cameras)
+            if not input_frame.views:
+                logger.warning(f"No views in frame {frame_idx}, skipping...")
+                continue
+                
+            # T_world_cam is the camera's pose in the world
+            T_world_cam = input_frame.views[0].camera.camera_to_world_xf
+            
+            # T_cam_world is the transform from world points to camera points
+            T_cam_world = np.linalg.inv(T_world_cam)
 
             for hand_idx in res.hand_poses.keys():
-                tracked_keypoints[hand_idx, frame_idx] = landmarks_from_hand_pose(
+                # 1. Get keypoints in UmeTrack's World Frame
+                keypoints_world = landmarks_from_hand_pose(
                     calibrated_hand_model, res.hand_poses[hand_idx], hand_idx
                 )
+                
+                # 2. Convert to homogeneous coordinates (N, 4)
+                num_keypoints = keypoints_world.shape[0]
+                ones = np.ones((num_keypoints, 1))
+                keypoints_world_homog = np.hstack((keypoints_world, ones))
+                
+                # 3. Apply the T_cam_world transformation
+                # (N, 4) = (N, 4) @ (4, 4).T
+                keypoints_cam_homog = keypoints_world_homog @ T_cam_world.T
+                
+                # 4. Convert back to (N, 3)
+                keypoints_cam = keypoints_cam_homog[:, :3]
+                
+                # 5. Flip Z-axis to match FoundationStereo (+Z Forward)
+                # UmeTrack/OpenXR is +Z backward, FoundationStereo is +Z forward
+                keypoints_foundation_frame = keypoints_cam
+                keypoints_foundation_frame[:, 2] *= -1
+                
+                tracked_keypoints[hand_idx, frame_idx] = keypoints_foundation_frame
+
                 valid_tracking[hand_idx, frame_idx] = True
  
         if not fs.exists(fs.dirname(output_path)):
