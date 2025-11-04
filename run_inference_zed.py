@@ -163,8 +163,14 @@ def _track_sequence(
                 # 5. Flip Z-axis to match FoundationStereo (+Z Forward)
                 # UmeTrack/OpenXR is +Z backward, FoundationStereo is +Z forward
                 keypoints_foundation_frame = keypoints_cam
-                keypoints_foundation_frame[:, 2] *= -1
+                R_x_180 = np.array([
+                                    [1.0,  0.0,  0.0],
+                                    [0.0, -1.0,  0.0],
+                                    [0.0,  0.0, -1.0]
+                                ])
                 
+                # Apply the rotation: (N, 3) = (N, 3) @ (3, 3)
+                keypoints_zed_image_frame = keypoints_cam @ R_x_180
                 tracked_keypoints[hand_idx, frame_idx] = keypoints_foundation_frame
 
                 valid_tracking[hand_idx, frame_idx] = True
