@@ -17,6 +17,20 @@ from lib.models.model_loader import load_pretrained_model
 from lib.tracker.tracker import HandTracker, HandTrackerOpts, InputFrame
 from lib.tracker.video_pose_data import SyncedImagePoseStream, ImageSequencePoseStream, _load_json, load_hand_model_from_dict
 from typing import Union
+try:
+    from irt.utils.color_print import info_print
+except ModuleNotFoundError:  # pragma: no cover - fallback for local runs without package install
+    import sys
+    from pathlib import Path
+
+    _repo_root = Path(__file__).resolve().parents[4]
+    _src_dir = _repo_root / "src"
+    if _src_dir.exists():
+        sys.path.insert(0, str(_src_dir))
+    try:
+        from irt.utils.color_print import info_print
+    except ModuleNotFoundError:
+        from utils.color_print import info_print
 logging.basicConfig(level = logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -34,9 +48,7 @@ def _track_sequence_and_calibrate(
     predicted_scale_samples = []
     
     for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
-        # Only use left camera (index 0) for prediction
-        left_view_only = [input_frame.views[0]] if input_frame.views else []
-        
+        # Use BOTH cameras during calibration (required for scale estimation)
         crop_cameras = tracker.gen_crop_cameras(
             [view.camera for view in input_frame.views],
             image_pose_stream._hand_pose_labels.camera_angles,
@@ -45,10 +57,7 @@ def _track_sequence_and_calibrate(
             min_num_crops=1,
         )
  
-        # Create a new InputFrame with only the left view
-        input_frame_left = InputFrame(views=left_view_only)
-        
-        res = tracker.track_frame_and_calibrate_scale(input_frame_left, crop_cameras)
+        res = tracker.track_frame_and_calibrate_scale(input_frame, crop_cameras)
         for hand_idx in res.hand_poses.keys():
             predicted_scale_samples.append(res.predicted_scales[hand_idx])
         if n_calibration_samples != 0 and len(predicted_scale_samples) >= n_calibration_samples:
@@ -83,6 +92,7 @@ def _track_sequence(
         model.eval()
         
         if data_path.endswith(".mp4"):
+            info_print(f"Loading image pose stream from {data_path}")
             image_pose_stream = SyncedImagePoseStream(data_path)
         elif os.path.isdir(data_path):
             # For directory input, try to detect ZED stereo format
@@ -222,7 +232,7 @@ def main():
     parser.add_argument('--output-dir', type=str, default=default_output,
                         help='Path to the output directory')
     parser.add_argument('--json-path', type=str, default=None,
-                        help='Path to the JSON file with camera parameters')
+                        help='Path to the JSON file with camera parameters, required for ZED stereo data, not required for .mp4 file from UmeTrack data')
     parser.add_argument('--visualize', action='store_true',
                         help='Automatically launch visualization after inference completes')
     parser.add_argument('--viz-port', type=int, default=8080,
@@ -244,6 +254,8 @@ def main():
 
     generic_hand_model = load_hand_model_from_dict(_load_json(args.generic_hand_model)["hand_model"])
     input_paths, output_paths = _find_input_output_files(args.input_file, args.output_dir)
+ 
+
     track_fn = partial(
         _track_sequence,
         model_path=args.model_path,
