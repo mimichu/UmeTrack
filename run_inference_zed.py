@@ -38,8 +38,8 @@ def _track_sequence_and_calibrate(
         left_view_only = [input_frame.views[0]] if input_frame.views else []
         
         crop_cameras = tracker.gen_crop_cameras(
-            [view.camera for view in left_view_only],
-            [image_pose_stream._hand_pose_labels.camera_angles[0]],  # Only left camera angle
+            [view.camera for view in input_frame.views],
+            image_pose_stream._hand_pose_labels.camera_angles,
             generic_hand_model,
             gt_tracking,
             min_num_crops=1,
