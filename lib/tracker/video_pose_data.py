@@ -19,6 +19,21 @@ from lib.tracker.tracker import InputFrame, ViewData
 
 from .tracking_result import SingleHandPose
 
+try:
+    from irt.utils.color_print import info_print
+except ModuleNotFoundError:  # pragma: no cover - fallback for local runs without package install
+    import sys
+    from pathlib import Path
+
+    _repo_root = Path(__file__).resolve().parents[4]
+    _src_dir = _repo_root / "src"
+    if _src_dir.exists():
+        sys.path.insert(0, str(_src_dir))
+    try:
+        from irt.utils.color_print import info_print
+    except ModuleNotFoundError:
+        from utils.color_print import info_print
+
 
 @dataclass
 class HandPoseLabels:
@@ -513,6 +528,7 @@ class SyncedImagePoseStream:
         else:
             # Only load pose labels if video is valid
             label_path = data_path[:-4] + ".json"
+            info_print(f"Loading pose labels from {label_path}")
             self._hand_pose_labels = _load_hand_pose_labels(label_path)
             self._is_valid = True
             assert len(self._hand_pose_labels) == video_length, f"Mismatch between pose labels ({len(self._hand_pose_labels)}) and video frames ({video_length})"

@@ -324,7 +324,7 @@ class HandVisualization3D:
         )
         
         # Playback controls
-        self.play_button = self.server.add_gui_button("Play/Pause")
+        self.play_button = self.server.gui.add_button("Play/Pause")
         self.speed_slider = self.server.add_gui_slider(
             "Speed",
             min=0.1,
