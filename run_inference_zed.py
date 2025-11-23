@@ -11,12 +11,16 @@ from lib.tracker.perspective_crop import landmarks_from_hand_pose
 from lib.common.hand import NUM_HANDS, NUM_LANDMARKS_PER_HAND
 from lib.common.hand import HandModel, scaled_hand_model
 from multiprocessing import Pool
-from typing import Optional, Tuple
+from typing import Optional, Tuple, overload
 import argparse
 from lib.models.model_loader import load_pretrained_model
 from lib.tracker.tracker import HandTracker, HandTrackerOpts, InputFrame
 from lib.tracker.video_pose_data import SyncedImagePoseStream, ImageSequencePoseStream, _load_json, load_hand_model_from_dict
 from typing import Union
+
+MM_TO_M = 0.001
+M_TO_MM = 1000.0
+
 try:
     from irt.utils.color_print import info_print
 except ModuleNotFoundError:  # pragma: no cover - fallback for local runs without package install
@@ -36,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 def _find_input_output_files(input_file: str, output_dir: str):
     input_full_path = [fs.join(input_file)]
-    output_full_path = [fs.join(output_dir, input_file.split("/")[-1].split(".")[0] + ".npy")]
+    output_file_name = '_'.join(input_file.split("/")[-6:-1]+input_file.split("/")[-1].split(".")[0:1]) # 'raw_data_real_separate_hand_testing_user_19_recording_01'
+    output_full_path = [fs.join(output_dir, output_file_name + ".npy")]
     return input_full_path, output_full_path
 
 def _track_sequence_and_calibrate(
@@ -135,6 +140,8 @@ def _track_sequence(
         # Reset the history and retrack using the calibrated skeleton.
         tracker.reset_history()
         tracked_keypoints = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
+        tracked_keypoints_eye = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 3])
+        tracked_keypoints_2d = np.zeros([NUM_HANDS, len(image_pose_stream), NUM_LANDMARKS_PER_HAND, 2])
         valid_tracking = np.zeros([NUM_HANDS, len(image_pose_stream)], dtype=bool)
         
         for frame_idx, (input_frame, gt_tracking) in enumerate(image_pose_stream):
@@ -168,29 +175,41 @@ def _track_sequence(
             ])
             # --- [END FIX] ---
 
+            # Get camera for world_to_eye conversion and 2D projection
+            camera = input_frame.views[1].camera # use the second left camera as that one usually have hands
+            
             for hand_idx in res.hand_poses.keys():
                 
                 # 1. Get keypoints in UmeTrack's World Frame
                 keypoints_world = landmarks_from_hand_pose(
                     calibrated_hand_model, res.hand_poses[hand_idx], hand_idx
                 )
+
+                # 2. Convert to eye coordinates using camera.world_to_eye() (like in visualize_keypoints.py)
+                keypoints_eye = camera.world_to_eye(keypoints_world)
                 
-                # 2. Convert to homogeneous coordinates
-                num_keypoints = keypoints_world.shape[0]
-                ones = np.ones((num_keypoints, 1))
-                keypoints_world_homog = np.hstack((keypoints_world, ones))
+                # 3. Project to 2D image plane using camera.eye_to_window()
+                keypoints_2d = camera.eye_to_window(keypoints_eye)
+
                 
-                # 3. Apply T_cam_world to move from World to Camera frame
-                keypoints_cam_homog = keypoints_world_homog @ T_cam_world.T
+                # # 4. Convert to homogeneous coordinates for ZED frame transformation
+                # num_keypoints = keypoints_world.shape[0]
+                # ones = np.ones((num_keypoints, 1))
+                # keypoints_world_homog = np.hstack((keypoints_world, ones))
                 
-                # 4. Convert back to (N, 3)
-                keypoints_cam = keypoints_cam_homog[:, :3]
+                # # 5. Apply T_cam_world to move from World to Camera frame
+                # keypoints_cam_homog = keypoints_world_homog @ T_cam_world.T
                 
-                # 5. Apply rotation to switch coordinate conventions
-                keypoints_zed_image_frame = keypoints_cam @ R_Y_flip
+                # # 6. Convert back to (N, 3)
+                # keypoints_cam = keypoints_cam_homog[:, :3]
                 
-                # 6. Save the correctly transformed keypoints
-                tracked_keypoints[hand_idx, frame_idx] = keypoints_zed_image_frame
+                # # 7. Apply rotation to switch coordinate conventions
+                # keypoints_zed_image_frame = keypoints_cam @ R_Y_flip
+                
+                # 8. Save all the keypoints
+                tracked_keypoints[hand_idx, frame_idx] = keypoints_world 
+                tracked_keypoints_eye[hand_idx, frame_idx] = keypoints_eye 
+                tracked_keypoints_2d[hand_idx, frame_idx] = keypoints_2d
                 
                 valid_tracking[hand_idx, frame_idx] = True
  
@@ -206,6 +225,25 @@ def _track_sequence(
         # Use numpy save format for compatibility with visualization script
         np.save(output_path, results_dict, allow_pickle=True)
         logger.info(f"Results saved at {output_path}")
+        
+        # Save 3D keypoints in eye coordinates as separate npy file
+        output_path_eye = output_path.replace(".npy", "_eye_3d.npy")
+        eye_results_dict = {
+            "tracked_keypoints": tracked_keypoints_eye,
+            "valid_tracking": valid_tracking,
+        }
+        np.save(output_path_eye, eye_results_dict, allow_pickle=True)
+        logger.info(f"3D eye coordinates saved at {output_path_eye}")
+        
+        # Save 2D projected keypoints as separate npy file
+        output_path_2d = output_path.replace(".npy", "_2d.npy")
+        keypoints_2d_dict = {
+            "tracked_keypoints": tracked_keypoints_2d,
+            "valid_tracking": valid_tracking,
+        }
+        np.save(output_path_2d, keypoints_2d_dict, allow_pickle=True)
+        logger.info(f"2D projected keypoints saved at {output_path_2d}")
+        
         return None
     except Exception as e:
         logger.error(f"Error processing {input_output[0] if input_output else 'unknown'}: {e}", exc_info=True)
@@ -237,6 +275,8 @@ def main():
                         help='Automatically launch visualization after inference completes')
     parser.add_argument('--viz-port', type=int, default=8080,
                         help='Port for visualization server (default: 8080)')
+    parser.add_argument('--override', action='store_true',
+                        help='Override existing output files')
     args = parser.parse_args()
     
     if not os.path.exists(args.input_file):
@@ -261,7 +301,8 @@ def main():
         model_path=args.model_path,
         generic_hand_model=generic_hand_model,
         n_calibration_samples=args.n_calibration_samples,
-        json_path=args.json_path
+        json_path=args.json_path,
+        override=args.override
     )
 
     print(f"Starting tracking on {len(input_paths)} files using {args.pool_size} workers...")
