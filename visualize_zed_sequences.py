@@ -46,21 +46,7 @@ GT_COLORS = {
 }
 
 # Keypoint connections for hand skeleton visualization
-HAND_CONNECTIONS = [
-    # Thumb
-    (0, 7), (7, 6),
-    # Index finger
-    (1, 10), (10, 9), (9, 8),
-    # Middle finger
-    (2, 13), (13, 12), (12, 11), 
-    # Ring finger
-    (3, 16), (16, 15), (15, 14),
-    # Pinky
-    (4, 19), (19, 18), (18, 17),
-    # Palm connections
-    (17, 5), (5, 6), (6, 8), (8, 11), (11, 14), (14, 17), (5, 20), (20, 11)
-]
-
+from hand_configs.UmeTrack import HAND_CONNECTIONS
 
 def project_keypoints_to_image(keypoints_3d: np.ndarray, camera) -> np.ndarray:
     """
