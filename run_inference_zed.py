@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for local runs withou
     try:
         from irt.utils.color_print import info_print
     except ModuleNotFoundError:
-        from utils.color_print import info_print
+        from irt.utils.color_print import info_print
 logging.basicConfig(level = logging.INFO)
 logger = logging.getLogger(__name__)
 

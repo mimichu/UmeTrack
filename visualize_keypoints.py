@@ -51,7 +51,7 @@ PRED_COLORS = {
 
 # Keypoint connections for hand skeleton visualization (MediaPipe-style)
 # Based on MediaPipe hand landmark model structure
-from hand_configs.UmeTrack import HAND_CONNECTIONS
+from irt.constants.hand_configs.UmeTrack import HAND_CONNECTIONS
 
 
 def project_keypoints_to_image(keypoints_3d: np.ndarray, camera) -> np.ndarray:

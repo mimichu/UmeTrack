@@ -25,8 +25,9 @@ import numpy as np
 
 # Add paths
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
-repo_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(repo_root / 'src'))
+from irt import REPO_ROOT
+sys.path.insert(0, str(Path(REPO_ROOT) / 'src'))
+
 
 from image_sequence_pose_stream import ImageSequencePoseStream
 from lib.tracker.perspective_crop import landmarks_from_hand_pose
@@ -46,7 +47,7 @@ GT_COLORS = {
 }
 
 # Keypoint connections for hand skeleton visualization
-from hand_configs.UmeTrack import HAND_CONNECTIONS
+from irt.constants.hand_configs.UmeTrack import HAND_CONNECTIONS
 
 def project_keypoints_to_image(keypoints_3d: np.ndarray, camera) -> np.ndarray:
     """

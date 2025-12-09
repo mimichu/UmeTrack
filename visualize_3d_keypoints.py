@@ -26,11 +26,11 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 import numpy as np
-from utils.color_print import debug_print
+from irt.utils.color_print import debug_print
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'lib'))
-repo_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(repo_root / 'src'))
+from irt import REPO_ROOT
+sys.path.insert(0, str(Path(REPO_ROOT) / 'src'))
 
 try:
     import viser
@@ -81,7 +81,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-from hand_configs.UmeTrack import HAND_CONNECTIONS
+from irt.constants.hand_configs.UmeTrack import HAND_CONNECTIONS
 
 # Colors for different hands (RGB)
 HAND_COLORS = {
