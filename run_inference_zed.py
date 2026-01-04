@@ -163,16 +163,16 @@ def _track_sequence(
             # T_world_cam is the camera's pose in the world
             T_world_cam = input_frame.views[0].camera.camera_to_world_xf
             
-            # T_cam_world is the transform from world points to camera points
-            T_cam_world = np.linalg.inv(T_world_cam)
+            # # T_cam_world is the transform from world points to camera points
+            # T_cam_world = np.linalg.inv(T_world_cam)
             
-            # Define 180-degree rotation matrix around X-axis
-            # This transforms from (+Y Up, +Z Back) to (+Y Down, +Z Fwd)
-            R_Y_flip = np.array([
-                [1.0,  0.0,  0.0],
-                [0.0, -1.0,  0.0],  # Flips Y
-                [0.0,  0.0,  1.0]   # Z remains forward
-            ])
+            # # Define 180-degree rotation matrix around X-axis
+            # # This transforms from (+Y Up, +Z Back) to (+Y Down, +Z Fwd)
+            # R_Y_flip = np.array([
+            #     [1.0,  0.0,  0.0],
+            #     [0.0, -1.0,  0.0],  # Flips Y
+            #     [0.0,  0.0,  1.0]   # Z remains forward
+            # ])
             # --- [END FIX] ---
 
             # Get camera for world_to_eye conversion and 2D projection
