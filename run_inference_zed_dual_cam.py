@@ -76,7 +76,7 @@ def open_svo(path: Path) -> sl.Camera:
     p.set_from_svo_file(str(path))
     p.svo_real_time_mode = False
     p.coordinate_units = sl.UNIT.METER
-    p.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP  # matches ArUco calib convention
+    # p.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP  # matches ArUco calib convention
     p.depth_mode = sl.DEPTH_MODE.NONE  # No depth needed; only images
     err = cam.open(p)
     if err != sl.ERROR_CODE.SUCCESS:
