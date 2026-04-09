@@ -3,3 +3,4 @@ tmp
 **/pred
 *.npy
 UmeTrack_data/
+zed_pred/
